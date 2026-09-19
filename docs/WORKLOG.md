@@ -30,3 +30,16 @@ No credentialed live Jev request, live child provider dispatch, non-git delegate
 - Kept trusted child instructions in the appended system prompt and moved task/context/expected output into the child user prompt as untrusted assignment data.
 - Added abort-listener cleanup in the process spawner and a real temporary executable-child test covering explicit JSON launch flags, provider/model evidence, and observed wall-time cleanup.
 - Final recorded status remains PARTIAL/TODO where a live provider, credentialed Jev call, or production Pi install is required.
+
+## 2026-09-19 — delegation-decision gate added to the plan
+
+- Added an optional local-versus-delegated Jev decision to `SPEC.md` and
+  `DEVPLAN.md` without changing current implementation behavior.
+- Defined `manual` (current default), `jev-suggest` (visible recommendation with
+  parent override), and `jev-enforce` (tool-surface control with fail-closed
+  behavior for execution tasks).
+- Kept this decision separate from child-model selection. Jev cannot create
+  subtasks, grant permissions, choose tools, or select the child model through
+  this gate.
+- Added T13 acceptance coverage for the real Pi pre-turn path, overrides,
+  service failure, invalid decisions, cancellation, and late responses.

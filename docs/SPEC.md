@@ -8,25 +8,30 @@ Build a standalone Pi extension with selective reuse of `rodh/pi-foreman` and
 Pi's official subagent example. This is not a pi-foreman fork, wrapper requiring
 pi-foreman to be installed, or new agent runtime.
 
-The product has two independent responsibilities:
+The product has three independent responsibilities:
 
-1. Choose a model once for each delegated assignment, using TypeSafe's Jev.
-2. Optionally enforce delegation by restricting the parent's execution tools.
+1. Optionally decide whether an upcoming task should stay with the parent or be
+   delegated, using a bounded Jev decision.
+2. Choose a model once for each delegated assignment, using TypeSafe's Jev or a
+   fixed policy.
+3. Optionally enforce delegation by restricting the parent's execution tools.
 
-The parent understands and decomposes the task. Jev selects from eligible models.
-Code validates, launches, cancels, and reports. The child does the assigned work
-on one fixed model. The parent integrates the result and decides what to do next.
+By default, the parent understands and decomposes the task and makes the
+local-versus-delegated choice itself. The optional Jev gate can recommend or
+enforce that choice. Code validates, launches, cancels, and reports. The child
+does the assigned work on one fixed model. The parent integrates the result and
+decides what to do next.
 
-**Status:** specification only; no implementation or runtime validation exists.
-This document replaces the previous specification in full. `DEVPLAN.md` owns
-implementation status and acceptance coverage. `WORKLOG.md` holds development
-receipts and decisions once work begins; this rewrite does not change it.
+**Status:** product specification; implementation and runtime evidence are tracked
+in `DEVPLAN.md` and `WORKLOG.md`. This document replaces the previous
+specification in full.
 
 ### V1 scope
 
 - One model-facing delegation tool, one assignment per invocation.
 - One active dispatch per parent extension instance, enforced in code.
 - Jev selection or fixed selection; explicit eligible default and optional pins.
+- Optional Jev local-versus-delegated decision: manual, advisory, or enforced.
 - Normal, delegate-execution, and coordinator-only parent modes.
 - Isolated child context, streamed progress, bounded results, cancellation.
 - Small local routing receipts and a fixed-versus-Jev evaluation.
@@ -118,7 +123,8 @@ extension. Freeze the final tool name during the compatibility milestone.
 
 ### User configuration
 
-- Selection: `fixed` or `jev`.
+- Selection: `fixed` or `jev` for choosing the child model.
+- Delegation decision: `manual`, `jev-suggest`, or `jev-enforce`.
 - Delegation: `normal`, `delegate-execution`, or `coordinator-only`.
 - Routing preference: `economy`, `balanced`, or `quality`.
 - Candidate profiles, exact default model, optional trusted agent model pins.
@@ -134,6 +140,17 @@ Installation leaves the parent in normal mode. Enforced modes require explicit
 user activation at an idle boundary. Recommend delegate-execution for the first
 trial. Jev use requires explicit external-disclosure consent and configuration;
 missing credentials must be visible, not disguised as successful routing.
+
+`manual` leaves the local-versus-delegated decision to the parent model, as in
+basic Pi. `jev-suggest` asks Jev for one bounded `delegate` or `local`
+recommendation before the parent acts; the parent may override it. The
+recommendation and confidence are visible, and Jev failure falls back to manual
+behavior with a visible warning. `jev-enforce` uses the same decision to control
+whether direct execution tools or delegation tools are available. It fails
+closed for an execution task if Jev is unavailable, invalid, or cancelled;
+explicit user override remains available. Neither mode lets Jev invent
+subtasks, grant permissions, or choose outside the configured model/tool
+policies.
 
 ## 4. Requirements
 
@@ -181,9 +198,11 @@ Apply this selection order:
 A fallback default is not a pin. Do not silently inherit the parent's model or
 choose an arbitrary catalog entry. Revalidate launch eligibility after selection.
 
-### R04 — One Jev judgment per assignment
+### R04 — One Jev model-selection judgment per delegated assignment
 
-Ask a Choice question over the eligible candidate IDs:
+When child-model selection is enabled, ask one Choice question over the eligible
+candidate IDs. A separate R11 delegation decision may happen before this; it is
+not a second model-selection request.
 
 > Which eligible model best fits this assignment under the supplied routing
 > preference and candidate profiles?
@@ -237,6 +256,30 @@ Pi version cannot enforce it.
 Never require a minimum number of child invocations. Conceptual answers need no
 ceremonial delegation. This is a tool-execution boundary, not proof of good task
 decomposition or a sandbox against hostile installed code.
+
+### R11 — Optional Jev delegation decision
+
+Support an explicit decision policy separate from child-model selection:
+
+- `manual`: do not call Jev; the parent decides whether to use `delegate_task`.
+- `jev-suggest`: ask one bounded Jev Choice for `delegate` or `local` before the
+  parent acts. Show the recommendation and confidence to the parent, but permit
+  the parent to override it. A Jev failure visibly returns control to the manual
+  path.
+- `jev-enforce`: use the same decision to select the parent tool surface. A
+  `delegate` result blocks direct execution tools and leaves delegation available;
+  a `local` result leaves direct execution available and does not require a
+  child. An unavailable, invalid, or cancelled decision fails closed for an
+  execution task rather than silently becoming manual. A user override must be
+  explicit and visible.
+
+The gate receives the current task and bounded policy/context data, not the full
+parent transcript or repository contents. It cannot create subtasks, select
+permissions, override mode allowlists, or choose a child model. The child-model
+selection remains a separate decision after the parent calls `delegate_task`.
+Cancellation never falls back to either recommendation. Record whether the
+recommendation was accepted or overridden, its latency, and its safe outcome in
+the receipt without storing the task body or raw service response.
 
 ### R07 — Child execution and truthful result contract
 
@@ -292,8 +335,10 @@ Keep local structured selection/completion records linked by dispatch ID:
 
 - eligible IDs and profile/config versions;
 - selected/applied identity and source;
+- delegation-decision policy, recommendation, effective action, and override state;
 - bounded selection probabilities/confidence when present;
-- chooser latency, available chooser/child usage, outcome and error category.
+- delegation-decision latency, model-chooser latency, available chooser/child usage,
+  outcome and error category.
 
 Exclude raw prompts, task bodies, repository contents, and secrets from default
 receipts. Do not store raw service error bodies without sanitization. Child output
@@ -311,6 +356,8 @@ prove the product has not inherited pi-foreman's HEAD-based dependency.
 Run a live Jev-to-child smoke test and a paired fixed-versus-Jev pilot under the
 same delegation mode. Include sensing overhead, failures, quality checks, total
 latency, and available usage/cost. Evaluate delegation-mode changes separately.
+For the Jev delegation gate, test manual, advisory, enforced, override, failure,
+and cancellation behavior through the real parent turn path.
 Do not claim savings, compatibility, or completion from mock fixtures. A provider
 or credential blocker leaves live acceptance incomplete, not silently waived.
 
@@ -320,17 +367,20 @@ Use a handful of modules with real consumers, not a scheduler framework:
 
 - Extension entry: tool/commands, mode lifecycle, dispatch admission.
 - Configuration/eligibility: profiles, exact identities, pins and hard constraints.
-- Jev selector: one Choice request, deadline, validation and eligible fallback.
+- Delegation gate: optional Jev local-versus-delegated decision and tool-surface
+  policy.
+- Jev selector: one model Choice request, deadline, validation and eligible fallback.
 - Child runner: explicit launch, event normalization, limits, cancellation/cleanup.
 - Receipts: local safe metadata and UI reporting.
 
 Conceptual lifecycle:
 
-`idle -> selecting -> running -> cleaning-up -> idle`
+`idle -> deciding? -> selecting -> running -> cleaning-up -> idle`
 
-Fixed and pinned dispatches skip sensing, not eligibility. Errors and cancellation
-enter cleanup. A busy response starts no lifecycle of its own. Model selection is
-not revisited once a child starts.
+Manual dispatches skip the delegation-decision step; fixed and pinned dispatches
+skip model sensing. Neither skips eligibility. Errors and cancellation enter
+cleanup. A busy response starts no lifecycle of its own. Model selection is not
+revisited once a child starts.
 
 ## 6. Acceptance contracts
 
@@ -348,6 +398,7 @@ not revisited once a child starts.
 | T10 | No sensing under disclosure prohibition; default receipts omit private payloads and secrets | R09 |
 | T11 | Verified delegated task works in a non-git workspace without plans, gates, validator or remediation | R01, R07, R10 |
 | T12 | Paired fixed/Jev pilot reports quality and total overhead honestly, with failures and unknown costs | R09, R10 |
+| T13 | Optional Jev delegation decision supports manual, suggestion, enforcement, override, failure, and cancellation without bypassing tool policy | R06, R10, R11 |
 
 ## 7. Authoritative integration references
 

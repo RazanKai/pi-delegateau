@@ -17,8 +17,12 @@ and only the task context. The parent keeps control of the overall work.
 - Optionally restricts the parent to coordinating and delegating instead of
   editing directly.
 
-It does not provide a planner, queue, parallel workers, automatic review,
-repair loop, worktree management, or correctness verdicts.
+Today the parent decides whether to delegate. The optional Jev-based
+local-versus-delegated decision is specified as a planned follow-up in
+[`docs/SPEC.md`](docs/SPEC.md) and [`docs/DEVPLAN.md`](docs/DEVPLAN.md).
+
+It does not provide a planner, queue, parallel workers, automatic review, repair
+loop, worktree management, or correctness verdicts.
 
 ## Requirements
 

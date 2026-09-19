@@ -2,14 +2,15 @@
 
 ## Authority and starting point
 
-Implement the replacement `SPEC.md`: a standalone Pi extension that selects a
-model for a delegated assignment and optionally enforces parent delegation.
+Implement the replacement `SPEC.md`: a standalone Pi extension that can decide
+whether a task stays local or is delegated, selects a model for delegated work,
+and optionally enforces parent delegation.
 Selectively adapt pi-foreman patterns; do not fork its workflow or ship it as a
 runtime dependency.
 
-This plan replaces the previous development plan in full. Implementation has not
-started. All acceptance statuses below are TODO. `WORKLOG.md` remains unchanged
-by this rewrite and becomes the chronological record of actual development.
+This plan replaces the previous development plan in full. The acceptance table
+below is updated as implementation evidence is produced. `WORKLOG.md` is the
+chronological record of actual development.
 
 The scope is intentionally sequential: one admitted dispatch per extension
 instance, no batches, chains, work queue, worktree management, automatic gates,
@@ -108,28 +109,49 @@ Exit evidence:
 **Acceptance targets:** T02, T03, T04, T08, T11; child/lifecycle portions of T09 and
 receipt portions of T10. Keep cross-milestone contracts PARTIAL until complete.
 
-## M2 — Jev chooses the child model
+## M2 — Jev decides delegation and chooses the child model
 
-**Goal:** add one bounded semantic selection operation to the working launch path.
+**Goal:** add bounded semantic decisions to the working parent/child launch path.
 
 Work:
 
-1. Define compact profiles with exact IDs, supplied capability descriptions,
-   provenance, known capabilities and optional economic metadata.
-2. Build one Choice over eligible candidates from the real resolved task and agent
-   definition. Keep trusted policy separate from untrusted task/context data.
-3. Bound input; do not load the repository or send parent conversation implicitly.
-4. Enforce the total selection deadline and response validation. Handle eligible
-   default fallback for sensor failure only, never for cancellation.
-5. Revalidate eligibility just before launch. Prevent a late sensor response from
-   starting work after cancel or deadline completion.
-6. Apply explicit consent for external sensing. Expose missing/misconfigured Jev
+1. Define the explicit delegation-decision policy: `manual`, `jev-suggest`, and
+   `jev-enforce`. Keep manual behavior as the default and preserve a visible
+   user override.
+2. Verify the real Pi pre-turn/active-tool seam needed to make one delegation
+   decision for an incoming task without rebuilding past conversation context.
+   If the seam cannot safely support this, report the blocker instead of hiding
+   the decision in prompt advice.
+3. Build one bounded Choice over `delegate` and `local` from the actual task and
+   bounded policy/context data. Do not send the full parent transcript or read
+   repository contents. Do not let the choice grant tools, create subtasks, or
+   select the child model.
+4. In suggest mode, expose the recommendation, confidence, latency, and visible
+   fallback to manual behavior. In enforce mode, select the parent tool surface,
+   fail closed on unavailable/invalid/cancelled decisions, and support explicit
+   user override.
+5. Build one separate Choice over eligible child candidates after the parent
+   actually delegates. Keep delegation decision and child-model selection
+   independently testable and independently receipted.
+6. Bound input and the total decision deadline; validate the decision and apply
+   cancellation/late-response rules before changing tools or launching work.
+7. Revalidate child-model eligibility just before launch. Handle eligible default
+   fallback for model-sensor failure only, never for cancellation.
+8. Apply explicit consent for external sensing. Expose missing/misconfigured Jev
    distinctly from successful selection and from a visible runtime fallback.
-7. Record selection source, candidate/profile versions, probabilities/confidence,
-   sensing usage/latency and applied identity without raw service error leakage.
+9. Record decision source, recommendation/override, candidate/profile versions,
+   probabilities/confidence, sensing usage/latency, and applied identity without
+   raw service error leakage.
 
 Exit evidence:
 
+- Manual mode makes no delegation-decision Jev request; parent behavior remains
+  unchanged.
+- Suggest mode shows a recommendation and permits an override without changing
+  the parent's tools; Jev failure visibly returns to manual behavior.
+- Enforce mode changes the real parent tool surface, blocks direct execution on
+  `delegate`, preserves delegation, fails closed on decision failure, and honors
+  an explicit user override.
 - A live Jev response goes through the registered delegation tool to an actual Pi
   child request with matching applied provider/model.
 - Controlled HTTP responses test invalid IDs, malformed output, timeout, service
@@ -141,8 +163,9 @@ Exit evidence:
 - Logging probes use sensitive sentinel values to demonstrate receipts exclude
   task bodies, prompts, credential values and unfiltered error bodies.
 
-**Acceptance targets:** T05, T06; complete T04, T09 and T10 as their full matrix
-passes. Credentials/network blockers leave the live T05 criterion incomplete.
+**Acceptance targets:** T05, T06, T13; complete T04, T09 and T10 as their full
+matrix passes. Credentials/network blockers leave the live T05/T13 criteria
+incomplete.
 
 ## M3 — Optional delegation enforcement
 
@@ -158,8 +181,10 @@ Work:
    the restriction analysis; newly registered tools are not auto-approved.
 4. Support explicit idle-boundary activation/deactivation and safe restoration of
    the captured tool selection when some tools no longer exist.
-5. Keep child tool policy independent. No spawn quotas, per-turn classifier, plan
-   injection, automatic verifier, or fallback to unrestricted parent execution.
+5. Keep child tool policy independent. No spawn quotas, hidden per-turn classifier,
+   plan injection, automatic verifier, or fallback to unrestricted parent execution.
+   The only classifier-like behavior is the explicit, configured Jev delegation
+   decision covered by M2/R11.
 6. Refuse unsupported enforced modes rather than silently downgrading to guidance.
 
 Exit evidence:
@@ -183,9 +208,9 @@ Exit evidence:
 
 Work:
 
-1. Document supported versions, configuration, profile/pin semantics, modes,
-   trust/credential handling, external data exposure, receipt location, limits,
-   cancellation guarantees and uninstall/deactivation.
+1. Document supported versions, configuration, profile/pin semantics, delegation
+   decision policies, modes, trust/credential handling, external data exposure,
+   receipt location, limits, cancellation guarantees and uninstall/deactivation.
 2. Include examples for exploration, implementation and explicit review as normal
    delegated assignments, not built-in role-specific orchestration.
 3. Verify clean installation/load without pi-foreman or unrequested global changes.
@@ -230,6 +255,7 @@ or artifact references when updating. Milestone ownership is not evidence.
 | T10 | R09 | M1, M2 | PARTIAL | `tests/receipts.test.ts` proves payload omission and secret sanitization; receipts are JSONL and Jev is skipped when prohibited. Full entry-path disclosure probes remain. |
 | T11 | R01, R07, R10 | M1, M3 | TODO | No real delegated task has been run in a disposable non-git workspace yet. |
 | T12 | R09, R10 | M4 | TODO | No fixed-versus-Jev pilot has been run. |
+| T13 | R06, R10, R11 | M2, M3 | TODO | Delegation gate is specified but not implemented; no Pi pre-turn decision path or manual/suggest/enforce E2E exists. |
 
 ## Minimum failure matrix
 
@@ -239,6 +265,8 @@ where appropriate:
 - Invalid configuration, unavailable credentials, missing or ineligible pin.
 - Empty/one/multiple candidate sets, unknown profile metadata, default unavailable.
 - Sensor disabled, remote error, invalid selected ID, slow response, late response.
+- Delegation gate manual/suggest/enforce, accepted recommendation, override,
+  unavailable service, invalid action, cancellation, and late response.
 - Concurrent dispatch attempts and failure during each lifecycle stage.
 - Child spawn error, provider error despite zero exit, signal exit, hanging child,
   descendant process, wall-time/turn limit, cleanup failure and session shutdown.
