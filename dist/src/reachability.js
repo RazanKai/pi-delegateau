@@ -113,7 +113,7 @@ export function probeModel(identity, options) {
         let child;
         try {
             child = spawn(options.command ?? "pi", [
-                "--offline",
+                ...(options.offline ? ["--offline"] : []),
                 "--no-session",
                 "--no-extensions",
                 "--provider", identity.provider,
@@ -195,7 +195,7 @@ export function startBackgroundProbe(options) {
     const done = (async () => {
         try {
             // Sequential, bounded and detached from any user-visible path.
-            const fresh = await runProbe({ ...options, targets, signal: controller.signal });
+            const fresh = await runProbe({ ...options, offline: true, targets, signal: controller.signal });
             // Merge with prior results so a model that was not re-probed keeps its
             // last known state rather than becoming "unprobed" again.
             const merged = new Map();

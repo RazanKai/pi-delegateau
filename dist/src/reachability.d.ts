@@ -38,6 +38,8 @@ export interface ProbeRunOptions {
     cwd: string;
     /** Models to probe. */
     targets: ModelIdentity[];
+    /** Keep background probes offline; explicit setup probes may opt into live calls. */
+    offline?: boolean;
     signal?: AbortSignal;
     onResult?: (result: ProbeResult) => void;
 }

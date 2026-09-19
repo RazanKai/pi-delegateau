@@ -117,6 +117,8 @@ export interface ProbeRunOptions {
   cwd: string;
   /** Models to probe. */
   targets: ModelIdentity[];
+  /** Keep background probes offline; explicit setup probes may opt into live calls. */
+  offline?: boolean;
   signal?: AbortSignal;
   onResult?: (result: ProbeResult) => void;
 }
@@ -141,7 +143,7 @@ export function probeModel(identity: ModelIdentity, options: ProbeRunOptions): P
     let child;
     try {
       child = spawn(options.command ?? "pi", [
-        "--offline",
+        ...(options.offline ? ["--offline"] : []),
         "--no-session",
         "--no-extensions",
         "--provider", identity.provider,
@@ -230,7 +232,7 @@ export function startBackgroundProbe(
   const done = (async () => {
     try {
       // Sequential, bounded and detached from any user-visible path.
-      const fresh = await runProbe({ ...options, targets, signal: controller.signal });
+      const fresh = await runProbe({ ...options, offline: true, targets, signal: controller.signal });
       // Merge with prior results so a model that was not re-probed keeps its
       // last known state rather than becoming "unprobed" again.
       const merged = new Map<string, ProbeResult>();

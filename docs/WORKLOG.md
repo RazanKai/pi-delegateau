@@ -527,3 +527,31 @@ eligible candidates: ollama-cloud/deepseek-v4.1-flash, openai-codex/gpt-5.6-luna
 
 No live child dispatch was run because the change is specifically intended to avoid
 spending the near-exhausted provider bucket.
+
+## 2026-09-20 01:30 CEST — onboarding bootstrap implementation
+
+Pi-assisted implementation added an explicit `/delegateau setup` flow and a focused
+`src/onboarding.ts` module. It discovers authenticated models from Pi's live registry,
+projects provider metadata into a reviewable candidate pool, provides the six built-in
+roles (`scout`, `researcher`, `evidence-auditor`, `worker`, `reviewer`, `oracle`),
+requires `pi-web-access` before enabling the web roles, preserves exact model IDs, and
+writes `.pi/delegateau.json` only after confirmation. `delegate` is intentionally absent.
+
+The setup review is side-effect-free. `/delegateau setup probe` is an explicit sequential
+reachability stage; quota measurement remains opt-in and was not run. External benchmark
+ingestion and provider-specific account-mode adapters remain input boundaries rather than
+invented live claims; unknown evidence is retained and labelled.
+
+Observed verification:
+
+```text
+$ env -u TYPESAFE_API_KEY -u TYPESAFE_BASE_URL npm run check
+Test Files  16 passed (16)
+Tests       137 passed (137)
+
+$ node --input-type=module -e '...generated setup config smoke...'
+{"candidateCount":1,"roles":["scout","researcher","evidence-auditor","worker","reviewer","oracle"],"selection":"jev","hasSecrets":false}
+```
+
+Session startup remains side-effect-free; only the explicit setup probe path performs
+online reachability checks. Quota measurement was not run.

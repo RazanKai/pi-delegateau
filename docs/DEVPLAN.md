@@ -443,6 +443,14 @@ Exit evidence:
 
 **Acceptance target:** T21; rerun T04–T06 and T13–T17 through the filtered path.
 
+## M10 — Explicit onboarding and live-pool bootstrap
+
+**Goal:** let a fresh project review a usable delegateau pool without hand-authoring models or silently spending quota.
+
+Work: add an explicit setup command and focused onboarding module; read Pi `getAvailable()` plus `hasConfiguredAuth()`, preserve exact registry metadata, safely project only policy into config, and require confirmation before writes. Keep probes sequential/cached and quota measurement opt-in; implement deterministic evidence/pruning and role-template contracts. Provider-specific benchmark fetchers and automatic measurement adapters remain deferred: unavailable evidence is labelled unmeasured, never fabricated.
+
+**Acceptance target:** T22.
+
 ## Acceptance coverage — authoritative status
 
 Statuses: TODO = not implemented/proven; PARTIAL = named subset verified; DONE =
@@ -472,6 +480,7 @@ or artifact references when updating. Milestone ownership is not evidence.
 | T19 | R02, R08, R13 | M8 | DONE | `src/admission.ts` implements the finite pool/FIFO queue and one idempotent settlement point; status reports running/blocked/queued capacity. Deterministic admission tests cover position changes, overflow, queued cancellation, double settlement and degraded slots. A live registered batch at concurrency 2 reported the third dispatch at queue position 1, two running timestamps before either settled, and promotion only after settlement. |
 | T20 | R07, R09, R13 | M8 | DONE | `src/index.ts` preserves the single form and adds mutually exclusive `assignments`; `src/dispatch.ts` gives each element an independent ID, lifecycle and receipt. `tests/extension-entry.test.ts` proves ordered three-element success plus ordered mixed success/failure with five independent receipts; the live batch returned three distinct successful IDs in input order. |
 | T21 | R03, R04, R05, R14 | M9 | DONE | `src/quota.ts` normalizes provider-owned Ollama/Codex-style snapshots, applies the 2% any-window floor, and renders bounded headroom with unknown state preserved. `src/index.ts`/`src/dispatch.ts` filter before gate/selection and revalidate before launch; `src/jev.ts` and `src/gate.ts` forward pressure facts. `tests/quota.test.ts` and `tests/jev.test.ts` cover parsing, tightest-window exclusion, snapshot discovery, and Jev propagation; current live cache reports Ollama weekly 3.8% and session 88.9% remaining. |
+| T22 | R15 | M10 | PARTIAL | `src/onboarding.ts` and `tests/onboarding.test.ts` provide deterministic discovery, evidence, pruning, templates and confirmation contracts. Explicit command/dry-run and provider-specific probe/benchmark adapters require live verification. |
 
 ## Minimum failure matrix
 

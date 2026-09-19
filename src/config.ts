@@ -105,6 +105,10 @@ function readCandidate(value: unknown, index: number): CandidateProfile {
     : undefined;
   const contextWindow = value.contextWindow === undefined ? undefined : readPositiveInt(value.contextWindow, `candidates[${index}].contextWindow`, 1);
   const latencyMs = value.latencyMs === undefined ? undefined : readPositiveInt(value.latencyMs, `candidates[${index}].latencyMs`, 1);
+  const maxOutputTokens = value.maxOutputTokens === undefined ? undefined : readPositiveInt(value.maxOutputTokens, `candidates[${index}].maxOutputTokens`, 1);
+  const reasoning = value.reasoning === undefined ? undefined : value.reasoning;
+  if (reasoning !== undefined && typeof reasoning !== "boolean") throw new Error(`candidates[${index}].reasoning must be a boolean`);
+  const inputModalities = value.inputModalities === undefined ? undefined : readStringArray(value.inputModalities, `candidates[${index}].inputModalities`);
   const cost = isRecord(value.cost)
     ? {
         ...(typeof value.cost.input === "number" && Number.isFinite(value.cost.input) && value.cost.input >= 0 ? { input: value.cost.input } : {}),
@@ -112,6 +116,8 @@ function readCandidate(value: unknown, index: number): CandidateProfile {
       }
     : undefined;
   const provenance = value.provenance === "built-in" ? "built-in" : "user";
+  const costSource = value.costSource === undefined ? undefined : value.costSource;
+  if (costSource !== undefined && costSource !== "provider" && costSource !== "user") throw new Error(`candidates[${index}].costSource is invalid`);
   return {
     identity,
     description,
@@ -120,7 +126,11 @@ function readCandidate(value: unknown, index: number): CandidateProfile {
     provenance,
     ...(contextWindow ? { contextWindow } : {}),
     ...(latencyMs ? { latencyMs } : {}),
+    ...(maxOutputTokens ? { maxOutputTokens } : {}),
+    ...(reasoning !== undefined ? { reasoning } : {}),
+    ...(inputModalities && inputModalities.length > 0 ? { inputModalities } : {}),
     ...(cost && Object.keys(cost).length > 0 ? { cost } : {}),
+    ...(costSource ? { costSource } : {}),
   };
 }
 

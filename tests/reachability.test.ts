@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -8,6 +8,7 @@ import {
   isKnownUnreachable,
   isProbeCacheFresh,
   readProbeCache,
+  runProbe,
   writeProbeCache,
   type ProbeCache,
 } from "../src/reachability.js";
@@ -92,5 +93,16 @@ describe("probe cache", () => {
   it("treats an unprobed model as reachable rather than excluding it", () => {
     expect(isKnownUnreachable({ provider: "openai-codex", id: "gpt-6-astra" }, cache(new Date().toISOString(), false))).toBe(false);
     expect(isKnownUnreachable({ provider: "openai-codex", id: "gpt-6-astra" }, undefined)).toBe(false);
+  });
+
+  it("keeps explicit setup probes online while background probes can remain offline", async () => {
+    const command = join(dir, "fake-pi");
+    writeFileSync(command, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/args\"\nprintf 'OK\\n'\n", "utf8");
+    chmodSync(command, 0o755);
+    const target = { provider: "fake", id: "live" };
+    await runProbe({ command, cwd: dir, targets: [target] });
+    expect(readFileSync(join(dir, "args"), "utf8")).not.toContain("--offline");
+    await runProbe({ command, cwd: dir, targets: [target], offline: true });
+    expect(readFileSync(join(dir, "args"), "utf8")).toContain("--offline");
   });
 });

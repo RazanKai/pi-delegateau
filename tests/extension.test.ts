@@ -34,6 +34,16 @@ describe("Pi extension entry point", () => {
     expect(activeTools).toEqual(["read", "write", "bash"]);
   });
 
+  it("reviews first-use setup without writing until confirmation", async () => {
+    const commands = new Map<string, any>(); const notifications: string[] = [];
+    extension({ registerTool: () => undefined, registerCommand: (n: string, c: any) => commands.set(n, c), on: () => undefined, getActiveTools: () => [], setActiveTools: () => undefined, getAllTools: () => [] } as any);
+    const ctx = { cwd: "/tmp", modelRegistry: { getAvailable: () => [{ provider: "live", id: "exact", contextWindow: 10 }], hasConfiguredAuth: () => true }, ui: { notify: (x: string) => notifications.push(x), confirm: async () => false } };
+    await commands.get("delegateau").handler("setup", ctx);
+    expect(notifications.at(-1)).toMatch(/1 configured Pi models: live\/exact/);
+    await commands.get("delegateau").handler("setup apply", ctx);
+    expect(notifications.at(-1)).toMatch(/not confirmed; no config was written/);
+  });
+
   // F03 regression: delegation from an untrusted project is refused before
   // any config read or child launch.
   it("refuses delegation when the host reports the project untrusted", async () => {

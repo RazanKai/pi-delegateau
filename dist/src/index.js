@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { Type } from "typebox";
 import { DispatchAdmission } from "./admission.js";
 import { loadConfig, CONFIG_FILE_NAME, CHILD_TOOLS } from "./config.js";
@@ -8,7 +10,8 @@ import { ModeController, policyForMode } from "./mode.js";
 import { buildRepositoryProfile, describeFailureCost } from "./live-data.js";
 import { quotaSelectorOptions } from "./selector-options.js";
 import { resolveCostMode, filterCandidatesByQuota, readQuotaState } from "./quota.js";
-import { isKnownUnreachable, isProbeCacheFresh, probeWorkingDir, readProbeCache, startBackgroundProbe } from "./reachability.js";
+import { buildSetupPlan, probeSetupPlan, setupConfig, writeSetupConfig } from "./onboarding.js";
+import { readProbeCache, probeWorkingDir, writeProbeCache } from "./reachability.js";
 import { appendReceipt, defaultDecisionReceiptPath } from "./receipt-store.js";
 import { buildDecisionReceipt, sanitizeError } from "./receipts.js";
 import { modelKey } from "./types.js";
@@ -182,26 +185,6 @@ function readOnlyWorkspace(mode) {
     return mode.current() !== "normal";
 }
 /**
- * Models worth probing: the configured pool. Probing every registry entry would
- * waste calls on models this configuration never offers, and the pool is
- * exactly the set whose reachability changes a decision.
- */
-function reachabilityTargets(config, ctx) {
-    const targets = [];
-    for (const candidate of config.candidates) {
-        try {
-            const model = ctx.modelRegistry.find(candidate.identity.provider, candidate.identity.id);
-            if (!model || !ctx.modelRegistry.hasConfiguredAuth(model))
-                continue;
-            targets.push(candidate.identity);
-        }
-        catch {
-            // An unreadable registry entry is simply not probed.
-        }
-    }
-    return targets;
-}
-/**
  * Names of Pi-loaded context files (AGENTS.md / CLAUDE.md). Names only: the
  * profile exists to size the repository, not to ship its contents to a sensor.
  */
@@ -256,9 +239,6 @@ export default function (pi) {
         getAllTools: () => pi.getAllTools(),
     });
     const activeDispatches = new Set();
-    // Handle for the background reachability probe, so session shutdown can kill
-    // any outstanding probe process (idempotent teardown).
-    let probeHandle;
     const gate = new DelegationGate();
     let shadowedDelegateTaskCalls = false;
     // Duplicate-tool guard (F20/SPEC §3): Pi's loader keeps the FIRST
@@ -368,10 +348,42 @@ export default function (pi) {
         },
     });
     pi.registerCommand("delegateau", {
-        description: "Show or change pi-delegateau status and parent delegation mode",
+        description: "Show/change status and mode, or explicitly review/write first-use setup",
         handler: async (args, ctx) => {
             const words = args.trim().split(/\s+/).filter(Boolean);
             const command = words[0] ?? "status";
+            if (command === "setup") {
+                // Explicit, side-effect-free review. It intentionally does not probe or
+                // measure quotas: those stages are opt-in and must never run at import.
+                const probeCache = readProbeCache();
+                const installedExtensions = pi.getAllTools().some((tool) => String(tool.sourceInfo?.path ?? "").includes("pi-web-access")) ? ["pi-web-access"] : [];
+                const setupOptions = { installedExtensions, ...(probeCache ? { probes: probeCache } : {}) };
+                const plan = buildSetupPlan(ctx.modelRegistry, setupOptions);
+                const generated = setupConfig(plan);
+                const ids = plan.candidates.map((candidate) => modelKey(candidate.identity)).join(", ") || "none";
+                const review = `setup review: ${plan.candidates.length} configured Pi models: ${ids}. ${plan.reasons.join("; ") || "All candidates are unmeasured; no probe or benchmark evidence was invented."}`;
+                if (words[1] === "probe") {
+                    const cache = await probeSetupPlan(plan, { cwd: probeWorkingDir() });
+                    writeProbeCache(cache);
+                    ctx.ui.notify(`pi-delegateau setup probe complete: ${cache.results.filter((r) => r.reachable).length}/${cache.results.length} reachable. Review results before applying; no project config was written.`, "info");
+                    return;
+                }
+                if (words[1] !== "apply") {
+                    ctx.ui.notify(`pi-delegateau ${review} Run /delegateau setup probe for an explicit sequential reachability stage, or /delegateau setup apply to request a confirmed write.`, "info");
+                    return;
+                }
+                const configPath = path.join(ctx.cwd, CONFIG_FILE_NAME);
+                const existing = fs.existsSync(configPath);
+                const confirmed = typeof ctx.ui.confirm === "function"
+                    ? await ctx.ui.confirm("Review delegateau setup?", `${review}\nPrepare ${configPath}${existing ? " (an existing config is present)" : ""}.`)
+                    : false;
+                const overwrite = existing && confirmed && typeof ctx.ui.confirm === "function"
+                    ? await ctx.ui.confirm("Overwrite existing delegateau config?", `Replace ${configPath}?`)
+                    : false;
+                const written = writeSetupConfig(ctx.cwd, generated, confirmed, overwrite);
+                ctx.ui.notify(written ? `pi-delegateau setup wrote ${written}` : "pi-delegateau setup not confirmed; no config was written.", written ? "info" : "warning");
+                return;
+            }
             const config = loadConfig(ctx.cwd);
             mode.setAllowedTools("delegate-execution", config.allowedParentTools.delegateExecution);
             mode.setAllowedTools("coordinator-only", config.allowedParentTools.coordinatorOnly);
@@ -571,45 +583,13 @@ export default function (pi) {
         catch {
             // Reporting is best-effort; never let it break session start.
         }
-        // Reachability probe: detached, never blocks the session. Its result is not
-        // needed now — the pool is resolved at dispatch time and a probe that
-        // finished last session is usable — so this costs zero dispatch latency and
-        // exists purely to stop offering models the provider will refuse.
-        const probedTargets = reachabilityTargets(config, ctx);
-        if (probedTargets.length > 0) {
-            try {
-                const existing = readProbeCache();
-                if (!isProbeCacheFresh(existing)) {
-                    const handle = startBackgroundProbe({
-                        cwd: probeWorkingDir(),
-                        targets: probedTargets,
-                        ...(config.piCommand ? { command: config.piCommand } : {}),
-                    });
-                    probeHandle = handle;
-                    void handle.done.then((cache) => {
-                        if (!cache)
-                            return;
-                        // Surface the outcome; a probe is diagnostic, never load-bearing.
-                        for (const result of cache.results) {
-                            if (!result.reachable) {
-                                ctx.ui.notify(`pi-delegateau: ${result.identity.provider}/${result.identity.id} did not answer during the reachability probe (${result.errorCategory ?? "unknown"}); it is excluded from future child selection.`, "warning");
-                            }
-                        }
-                    }).catch(() => undefined);
-                }
-            }
-            catch {
-                // Probing is best-effort: a failure must never affect the session.
-            }
-        }
+        // Reachability probes are explicit via `/delegateau setup probe`; session
+        // startup must not create provider traffic or spend quota.
     });
     pi.on("session_shutdown", () => {
         gate.invalidate("session shutdown");
         for (const controller of activeDispatches)
             controller.abort();
-        // Idempotent teardown: kills any outstanding probe process.
-        probeHandle?.abort();
-        probeHandle = undefined;
         mode.clearRequestRestriction();
         mode.setBusy(false);
     });

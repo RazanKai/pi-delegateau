@@ -535,6 +535,14 @@ quota value. This affects automatic Jev routing only; manual Hermes quota handli
 and user policy remain separate. Quota reads are snapshots, not measurement passes,
 and no per-model quota coefficient is inferred from them.
 
+### R15 — Explicit first-use onboarding and model-pool bootstrap
+
+A fresh configuration may be empty. Extension import and session start must remain side-effect free: no network discovery, reachability probe, quota measurement, benchmark request, or config write occurs implicitly. An explicit `/delegateau setup` review discovers only Pi registry models with configured auth, preserves exact `provider/model` identities and registry metadata, and labels absent probe/benchmark evidence unmeasured. `/delegateau setup apply` requires an affirmative confirmation and never replaces an existing config without a second explicit overwrite confirmation.
+
+Reachability probes use the child launch shape, run sequentially, cache classified failures, and are explicit setup stages; missing evidence never removes a candidate. Provider-owned telemetry and credential shape may label access mode, while user overrides remain authoritative. Quota-cost measurement is bounded and opt-in; no measurement occurs against a near-exhausted bucket. External benchmark records include exact identity, source, benchmark/version, date, and provider/independent provenance; incompatible versions cannot establish dominance. Pruning removes confirmed-unreachable models and only proven dominated models; unknowns remain reviewable.
+
+Setup generates `scout`, `researcher`, `evidence-auditor`, `worker`, `reviewer`, and `oracle`, never `delegate`. Web roles require `pi-web-access`; missing extensions make those roles unavailable rather than widening tools. Discovery/cache data stays outside project policy configuration and generated JSON excludes credentials.
+
 ### R10 — Evidence and useful scope
 
 Test the actual extension dispatch path and hooks, not only internal functions.
@@ -607,6 +615,7 @@ cancellation and child cleanup distinct rather than overloading one state machin
 | T19 | Configured parallel slots overlap real children, FIFO overflow waits with position updates, queued cancellation never starts late, and blocked cleanup degrades only its owning slot | R02, R08, R13 |
 | T20 | Single form remains compatible; batch assignments receive independent dispatch IDs, ordered results and receipts while sharing the same bounded pool and cancellation rules | R07, R09, R13 |
 | T21 | Provider-owned quota windows hard-exclude near-exhausted providers before Jev, revalidate before launch, and expose non-authoritative headroom pressure with unknown state preserved | R03, R04, R05, R14 |
+| T22 | Explicit setup discovers configured live registry identities, reviews an unmeasured pool and safe role templates, and writes only after confirmation; probes/measurement remain opt-in | R15 |
 
 ## 7. Authoritative integration references
 
