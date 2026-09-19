@@ -2,10 +2,19 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { resolveCostMode } from "./quota.js";
 import { runProbe } from "./reachability.js";
+const WEB_ACCESS_EXTENSIONS = ["pi-web-access", "donsetch"];
+export function detectWebAccessExtensions(tools) {
+    return WEB_ACCESS_EXTENSIONS.filter((extension) => tools.some((tool) => {
+        if (typeof tool !== "object" || tool === null)
+            return false;
+        const sourceInfo = tool.sourceInfo;
+        return [sourceInfo?.path, sourceInfo?.source, sourceInfo?.baseDir].some((value) => typeof value === "string" && value.toLowerCase().includes(extension));
+    }));
+}
 const roles = {
     scout: { tools: ["read", "grep", "find", "ls"], instructions: "Fast local codebase reconnaissance. Read-only: inspect files, locate relevant code, and report concise findings with paths. Do not modify files or run commands." },
-    researcher: { tools: ["read", "grep", "find", "ls", "web_search", "web_fetch"], childExtensions: ["pi-web-access"], instructions: "Research web and documentation sources. Return a concise brief with URLs, dates where relevant, and clear uncertainty. Do not modify files." },
-    "evidence-auditor": { tools: ["read", "grep", "find", "ls", "web_search", "web_fetch"], childExtensions: ["pi-web-access"], instructions: "Independently check research claims against primary sources. Report supported, contradicted, and unverified claims with source URLs. Do not modify files." },
+    researcher: { tools: ["read", "grep", "find", "ls", "web_search", "web_fetch"], webAccess: true, instructions: "Research web and documentation sources. Return a concise brief with URLs, dates where relevant, and clear uncertainty. Do not modify files." },
+    "evidence-auditor": { tools: ["read", "grep", "find", "ls", "web_search", "web_fetch"], webAccess: true, instructions: "Independently check research claims against primary sources. Report supported, contradicted, and unverified claims with source URLs. Do not modify files." },
     worker: { tools: ["read", "grep", "find", "ls", "bash", "edit", "write"], instructions: "Implement carefully, validate with focused checks, and report changes and results. Escalate ambiguity or missing evidence instead of guessing." },
     reviewer: { tools: ["read", "grep", "find", "ls", "edit", "write"], instructions: "Review task, plan, tests, edge cases, and simplicity. Small directly justified fixes are allowed; report them and any remaining concerns." },
     oracle: { tools: ["read", "grep", "find", "ls"], instructions: "Give a read-only second opinion. Challenge assumptions, identify missing evidence and simpler alternatives. Do not modify files." },
@@ -72,13 +81,15 @@ export function pruneSetupCandidates(candidates, evidence = [], probes) {
 export function roleTemplates(installedExtensions = []) {
     const unavailable = [];
     const agents = {};
+    const webExtension = WEB_ACCESS_EXTENSIONS.find((extension) => installedExtensions.includes(extension));
     for (const [name, role] of Object.entries(roles)) {
-        const missing = role.childExtensions?.filter((extension) => !installedExtensions.includes(extension)) ?? [];
-        if (missing.length) {
-            unavailable.push(`${name}: requires ${missing.join(", ")}`);
+        const childExtensions = role.webAccess ? (webExtension ? [webExtension] : undefined) : role.childExtensions;
+        if (role.webAccess && !webExtension) {
+            unavailable.push(`${name}: requires one of ${WEB_ACCESS_EXTENSIONS.join(" or ")}`);
             continue;
         }
-        agents[name] = role;
+        const { webAccess: _webAccess, ...template } = role;
+        agents[name] = { ...template, ...(childExtensions ? { childExtensions } : {}) };
     }
     return { agents, unavailable };
 }

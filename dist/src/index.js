@@ -10,7 +10,7 @@ import { ModeController, policyForMode } from "./mode.js";
 import { buildRepositoryProfile, describeFailureCost } from "./live-data.js";
 import { quotaSelectorOptions } from "./selector-options.js";
 import { resolveCostMode, filterCandidatesByQuota, readQuotaState } from "./quota.js";
-import { buildSetupPlan, probeSetupPlan, setupConfig, writeSetupConfig } from "./onboarding.js";
+import { buildSetupPlan, detectWebAccessExtensions, probeSetupPlan, setupConfig, writeSetupConfig } from "./onboarding.js";
 import { readProbeCache, probeWorkingDir, writeProbeCache } from "./reachability.js";
 import { appendReceipt, defaultDecisionReceiptPath } from "./receipt-store.js";
 import { buildDecisionReceipt, sanitizeError } from "./receipts.js";
@@ -356,7 +356,7 @@ export default function (pi) {
                 // Explicit, side-effect-free review. It intentionally does not probe or
                 // measure quotas: those stages are opt-in and must never run at import.
                 const probeCache = readProbeCache();
-                const installedExtensions = pi.getAllTools().some((tool) => String(tool.sourceInfo?.path ?? "").includes("pi-web-access")) ? ["pi-web-access"] : [];
+                const installedExtensions = detectWebAccessExtensions(pi.getAllTools());
                 const setupOptions = { installedExtensions, ...(probeCache ? { probes: probeCache } : {}) };
                 const plan = buildSetupPlan(ctx.modelRegistry, setupOptions);
                 const generated = setupConfig(plan);

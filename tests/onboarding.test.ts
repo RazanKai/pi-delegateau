@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildSetupPlan, discoverSetupCandidates, measureQuotaCost, pruneSetupCandidates, roleTemplates, setupConfig, writeSetupConfig, type BenchmarkEvidence } from "../src/onboarding.js";
+import { buildSetupPlan, detectWebAccessExtensions, discoverSetupCandidates, measureQuotaCost, pruneSetupCandidates, roleTemplates, setupConfig, writeSetupConfig, type BenchmarkEvidence } from "../src/onboarding.js";
 import { parseConfig } from "../src/config.js";
 
 const registry: any = { getAvailable: () => [
@@ -45,9 +45,15 @@ describe("explicit onboarding", () => {
     evidence[1]!.version = "2";
     expect(pruneSetupCandidates(base, evidence).candidates).toHaveLength(2);
   });
-  it("surfaces required web extensions and never generates delegate children", () => {
-    const missing = roleTemplates([]); expect(missing.agents).not.toHaveProperty("delegate"); expect(missing.agents).not.toHaveProperty("researcher"); expect(missing.unavailable.join(" ")).toContain("pi-web-access");
-    expect(roleTemplates(["pi-web-access"]).agents).toHaveProperty("researcher");
+  it("supports either web extension and never generates delegate children", () => {
+    const missing = roleTemplates([]);
+    expect(missing.agents).not.toHaveProperty("delegate");
+    expect(missing.agents).not.toHaveProperty("researcher");
+    expect(missing.unavailable.join(" ")).toContain("pi-web-access or donsetch");
+    expect(roleTemplates(["pi-web-access"]).agents.researcher).toMatchObject({ childExtensions: ["pi-web-access"] });
+    expect(roleTemplates(["donsetch"]).agents.researcher).toMatchObject({ childExtensions: ["donsetch"] });
+    expect(detectWebAccessExtensions([{ sourceInfo: { path: "/agent/node_modules/donsetch/pi-extension.ts" } }])).toEqual(["donsetch"]);
+    expect(detectWebAccessExtensions([{ sourceInfo: { source: "pi-web-access" } }])).toEqual(["pi-web-access"]);
   });
   it("does not measure unless explicitly opted in", async () => {
     let calls = 0; expect(await measureQuotaCost(false, async () => ++calls)).toBeUndefined(); expect(calls).toBe(0);

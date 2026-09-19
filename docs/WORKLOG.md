@@ -534,7 +534,7 @@ Pi-assisted implementation added an explicit `/delegateau setup` flow and a focu
 `src/onboarding.ts` module. It discovers authenticated models from Pi's live registry,
 projects provider metadata into a reviewable candidate pool, provides the six built-in
 roles (`scout`, `researcher`, `evidence-auditor`, `worker`, `reviewer`, `oracle`),
-requires `pi-web-access` before enabling the web roles, preserves exact model IDs, and
+enables the web roles when either `pi-web-access` or `donsetch` is installed, preserves exact model IDs, and
 writes `.pi/delegateau.json` only after confirmation. `delegate` is intentionally absent.
 
 The setup review is side-effect-free. `/delegateau setup probe` is an explicit sequential
@@ -555,3 +555,10 @@ $ node --input-type=module -e '...generated setup config smoke...'
 
 Session startup remains side-effect-free; only the explicit setup probe path performs
 online reachability checks. Quota measurement was not run.
+
+## 2026-09-20 01:51 CEST — web extension eligibility correction
+
+The two web-research roles now accept either installed `pi-web-access` or `donsetch`,
+select the available extension in generated child configuration, and remain unavailable
+when neither is present. The built artifact was smoke-tested with the installed donsetch
+package; both roles selected `donsetch` and no internal eligibility marker was serialized.

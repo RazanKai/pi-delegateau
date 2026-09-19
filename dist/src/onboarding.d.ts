@@ -40,6 +40,7 @@ export interface SetupPlan {
     agents: Record<string, unknown>;
     reasons: string[];
 }
+export declare function detectWebAccessExtensions(tools: readonly unknown[]): string[];
 /** Discover only models Pi currently exposes AND says have configured auth. */
 export declare function discoverSetupCandidates(registry: RegistryForSetup, costMode?: CostModeConfig): SetupCandidate[];
 /** Only comparable evidence (same source, benchmark and version) can prove dominance. */
