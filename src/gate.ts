@@ -10,6 +10,7 @@ import type {
   RoutingPreference,
 } from "./types.js";
 import { COMPLEXITY_EFFORT, COMPLEXITY_LEVELS } from "./types.js";
+import { describeCandidateProviderQuota, type QuotaState } from "./quota.js";
 import { isComplexityLevel } from "./live-data.js";
 
 export type GateRecommendation = "local" | "delegate";
@@ -28,6 +29,8 @@ export interface DelegationGateInput {
   candidates: CandidateProfile[];
   childAvailable: boolean;
   childAgentNames: string[];
+  /** Current provider budget facts; omitted providers are unknown. */
+  providerQuota?: QuotaState;
   allowExternalSensing: boolean;
   deadlineMs: number;
   maxGatePromptChars: number;
@@ -47,6 +50,7 @@ export interface DelegationChoiceInput {
     candidates: CandidateProfile[];
     childAvailable: boolean;
     childAgentNames: string[];
+    providerQuota?: QuotaState;
     repository?: RepositoryProfile;
     failureCost?: string;
   };
@@ -143,6 +147,12 @@ function copyInput(input: DelegationGateInput): DelegationGateInput {
       ...(candidate.limitations ? { limitations: [...candidate.limitations] } : {}),
     })),
     childAgentNames: [...input.childAgentNames],
+    ...(input.providerQuota ? {
+      providerQuota: Object.fromEntries(Object.entries(input.providerQuota).map(([provider, quota]) => [provider, {
+        ...quota,
+        windows: quota.windows.map((window) => ({ ...window })),
+      }])),
+    } : {}),
   };
 }
 
@@ -264,6 +274,7 @@ export class DelegationGate {
             })),
             childAvailable: copied.childAvailable,
             childAgentNames: [...copied.childAgentNames],
+            ...(copied.providerQuota ? { providerQuota: copied.providerQuota } : {}),
             ...(copied.repository ? { repository: copied.repository } : {}),
             ...(copied.failureCost ? { failureCost: copied.failureCost } : {}),
           },
@@ -404,9 +415,13 @@ export class JevDelegationSelector implements DelegationChoiceRuntime {
 
   async choose(input: DelegationChoiceInput): Promise<DelegationChoiceAnswer> {
     if (!this.client) throw new Error("Delegation decision sensor is unavailable: no credentials or transport configured");
+    const quotaFacts = describeCandidateProviderQuota(input.state.candidates, input.state.providerQuota);
+    const quotaText = quotaFacts.length > 0
+      ? ` Current live budget: ${quotaFacts.join("; ")}. Do not choose a provider whose budget is absent from the eligible candidates.`
+      : " Current live budget is unknown; do not infer quota from price or provider name.";
     const criteria = {
-      local: "Handle the request with the current parent; delegation is not worth its handoff cost.",
-      delegate: "Send the request to one eligible child; the child can provide a useful isolated execution path.",
+      local: `Handle the request with the current parent; delegation is not worth its handoff cost.${quotaText}`,
+      delegate: `Send the request to one eligible child; the child can provide a useful isolated execution path.${quotaText}`,
     };
     // One call, two questions: the local-vs-delegate judgement and the
     // difficulty rating. Asking both together keeps one bounded sensing

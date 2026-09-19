@@ -514,6 +514,27 @@ same pool and return results in input order. One element's ordinary failure does
 not erase sibling receipts; cancellation propagates to queued and running siblings.
 The batch result must not collapse distinct outcomes into one claimed success.
 
+### R14 — Quota-aware provider eligibility and Jev pressure
+
+Read provider-owned quota snapshots at dispatch/request resolution time and normalize
+provider-specific windows into provider, window name, used fraction, remaining
+fraction, and reset metadata when available. A missing or stale provider snapshot is
+unknown, not unlimited capacity; never infer headroom from model price, provider
+name, or the quota state the parent used manually outside this extension.
+
+Before Jev sees candidates, exclude a provider when any observed limiting window has
+at most the exhaustion floor (2% remaining by default). The 5h/session, weekly, and
+monthly windows are all independent constraints; the tightest one binds. Revalidate
+this hard eligibility immediately before child launch so a provider that crosses the
+floor while Jev is deciding cannot be launched.
+
+Above the floor, pass bounded per-provider headroom and reset facts to both the child
+model selector and the local-versus-delegated gate. Jev may use that as a soft
+pressure signal, but it must not treat an unknown provider as healthy or invent a
+quota value. This affects automatic Jev routing only; manual Hermes quota handling
+and user policy remain separate. Quota reads are snapshots, not measurement passes,
+and no per-model quota coefficient is inferred from them.
+
 ### R10 — Evidence and useful scope
 
 Test the actual extension dispatch path and hooks, not only internal functions.
@@ -585,6 +606,7 @@ cancellation and child cleanup distinct rather than overloading one state machin
 | T18 | Per-agent child-extension allowlists resolve Pi package manifests and explicit paths fail closed; absent/empty stays built-in-only and pi-delegateau/delegate_task cannot enter a child | R07, R08, R12 |
 | T19 | Configured parallel slots overlap real children, FIFO overflow waits with position updates, queued cancellation never starts late, and blocked cleanup degrades only its owning slot | R02, R08, R13 |
 | T20 | Single form remains compatible; batch assignments receive independent dispatch IDs, ordered results and receipts while sharing the same bounded pool and cancellation rules | R07, R09, R13 |
+| T21 | Provider-owned quota windows hard-exclude near-exhausted providers before Jev, revalidate before launch, and expose non-authoritative headroom pressure with unknown state preserved | R03, R04, R05, R14 |
 
 ## 7. Authoritative integration references
 

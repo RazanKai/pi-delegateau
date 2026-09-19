@@ -492,3 +492,38 @@ Known limitation: the injection parameter for tests cannot distinguish "credenti
 absent" from "not supplied" (both are `undefined`); the production path calls
 `detectAuthType` directly and returns `undefined` for an absent credential, which
 correctly reaches the `default` branch.
+
+## 2026-09-20 00:30 CEST — quota-aware eligibility and Jev pressure
+
+Implemented the automatic quota path separately from manual Hermes quota handling.
+The extension now reads provider-owned snapshots at request/dispatch resolution:
+Ollama's `limits.<window>.usage` and Codex-style `rate_limit.*_window.used_percent`
+normalize to the same provider/window/headroom shape. Missing state remains unknown;
+no current account quota values or per-model measurement pass were hardcoded.
+
+- Added a provider-level hard exhaustion floor of 2% remaining. Any observed session,
+  weekly, or monthly window at the floor excludes every model from that provider
+  before the gate/chooser sees it; dispatch revalidates the filter before launch.
+- Added bounded soft pressure to both Jev Choices: each known window's remaining
+  percentage and reset metadata are included, while providers without a snapshot are
+  explicitly labelled unknown rather than healthy/unlimited.
+- Current live snapshot verification (read-only) reported
+  `ollama-cloud`: weekly 3.8% remaining, session 88.9% remaining. At the 2% hard
+  floor both Ollama and OpenAI-shaped candidates remain eligible; Jev receives the
+  3.8% weekly pressure instead of a hardcoded OpenAI comparison.
+
+$ env -u TYPESAFE_API_KEY -u TYPESAFE_BASE_URL npm run check
+> pi-delegateau@0.1.0 check
+> npm run build && npm test
+
+Test Files  15 passed (15)
+Tests       128 passed (128)
+
+$ node --input-type=module -e 'readQuotaState(); filterCandidatesByQuota(...)'
+{"ollama-cloud":{"session":88.9,"weekly":3.8}}
+ollama-cloud quota headroom: weekly 3.8% remaining, session 88.9% remaining
+eligible candidates: ollama-cloud/deepseek-v4.1-flash, openai-codex/gpt-5.6-luna
+```
+
+No live child dispatch was run because the change is specifically intended to avoid
+spending the near-exhausted provider bucket.

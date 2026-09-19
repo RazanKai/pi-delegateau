@@ -1,4 +1,5 @@
 import type { CandidateProfile, ComplexityLevel, DelegationMode, DelegationPolicy, RepositoryProfile, RoutingPreference } from "./types.js";
+import { type QuotaState } from "./quota.js";
 export type GateRecommendation = "local" | "delegate";
 export type GateRestriction = "none" | "delegate" | "blocked";
 export type GateSource = "manual" | "policy-determined" | "jev" | "fallback" | "failed" | "user-override" | "cancelled";
@@ -18,6 +19,8 @@ export interface DelegationGateInput {
     candidates: CandidateProfile[];
     childAvailable: boolean;
     childAgentNames: string[];
+    /** Current provider budget facts; omitted providers are unknown. */
+    providerQuota?: QuotaState;
     allowExternalSensing: boolean;
     deadlineMs: number;
     maxGatePromptChars: number;
@@ -36,6 +39,7 @@ export interface DelegationChoiceInput {
         candidates: CandidateProfile[];
         childAvailable: boolean;
         childAgentNames: string[];
+        providerQuota?: QuotaState;
         repository?: RepositoryProfile;
         failureCost?: string;
     };

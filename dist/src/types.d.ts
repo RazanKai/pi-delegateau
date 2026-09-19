@@ -1,3 +1,4 @@
+import type { QuotaState } from "./quota.js";
 export type SelectionMode = "fixed" | "jev";
 export type DelegationMode = "normal" | "delegate-execution" | "coordinator-only";
 export type DelegationPolicy = "manual" | "jev-suggest" | "jev-enforce";
@@ -86,6 +87,8 @@ export interface DelegateRequest {
     complexity?: ComplexityLevel;
     candidates: CandidateProfile[];
     defaultModel?: ModelIdentity;
+    /** Provider budget state read for this dispatch; absent means unknown. */
+    quotaState?: QuotaState;
     selectionMode: SelectionMode;
     allowExternalSensing: boolean;
     selectionDeadlineMs?: number;
@@ -105,6 +108,8 @@ export interface JevChoiceInput {
         /** Thinking effort the gate's level implies, when a level is known. */
         suggestedEffort?: ThinkingLevel;
         candidates: CandidateProfile[];
+        /** Current provider budget facts; missing providers are unknown. */
+        providerQuota?: QuotaState;
     };
     candidateIds: string[];
     question: string;

@@ -1,6 +1,6 @@
 import type { JevChoiceAnswer, JevChoiceInput } from "./types.js";
 import type { ChoiceRuntime } from "./selection.js";
-import { type CostModeConfig, type QuotaStore } from "./quota.js";
+import { type CostModeConfig, type QuotaState, type QuotaStore } from "./quota.js";
 export interface JevClientLike {
     systemOne(request: unknown, options?: {
         signal?: AbortSignal;
@@ -15,6 +15,8 @@ export declare class JevSelector implements ChoiceRuntime {
     private readonly timeoutMs;
     /** Measured quota coefficients for quota-metered providers, if any exist. */
     private readonly quotaStore;
+    /** Per-provider live budget state, if a provider snapshot exists. */
+    private readonly quotaState;
     /** Per-provider metering overrides from config. */
     private readonly costModeConfig;
     /**
@@ -26,6 +28,7 @@ export declare class JevSelector implements ChoiceRuntime {
         client?: JevClientLike;
         timeoutMs?: number;
         quotaStore?: QuotaStore;
+        quotaState?: QuotaState;
         costModeConfig?: CostModeConfig;
     });
     choose(input: JevChoiceInput): Promise<JevChoiceAnswer>;

@@ -5,8 +5,9 @@ import { resolveChildExtensions, validateProbedChildTools } from "./child-extens
 import { CHILD_TOOLS } from "./config.js";
 import { JevSelector } from "./jev.js";
 import { quotaSelectorOptions } from "./selector-options.js";
-import { resolveCandidateData } from "./live-data.js";
+import { filterCandidatesByQuota, readQuotaState } from "./quota.js";
 import { isKnownUnreachable, readProbeCache } from "./reachability.js";
+import { resolveCandidateData } from "./live-data.js";
 import { PiProcessSpawner, probePiExtensionTools } from "./pi-process.js";
 import { appendReceipt, defaultReceiptPath } from "./receipt-store.js";
 import { buildReceipt, dispatchSummary, sanitizeError } from "./receipts.js";
@@ -44,8 +45,8 @@ export interface ExecuteDispatchOptions {
   markDelegated: () => void;
 }
 
-function eligibleCandidates(config: DelegateConfig, agent: TrustedAgent, ctx: ExtensionContext): CandidateProfile[] {
-  return config.candidates
+function eligibleCandidates(config: DelegateConfig, agent: TrustedAgent, ctx: ExtensionContext, quotaState?: ReturnType<typeof readQuotaState>): CandidateProfile[] {
+  return filterCandidatesByQuota(config.candidates
     .filter((candidate) => {
       const model = ctx.modelRegistry.find(candidate.identity.provider, candidate.identity.id);
       if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) return false;
@@ -59,7 +60,7 @@ function eligibleCandidates(config: DelegateConfig, agent: TrustedAgent, ctx: Ex
     // Without this the chooser sees only a prose description and a hand-written
     // price — measured wrong for 9 of 12 candidates, one by 20x — so it routes
     // on invented numbers.
-    .map((candidate) => applyLiveData(candidate, ctx));
+    .map((candidate) => applyLiveData(candidate, ctx)), quotaState);
 }
 
 /** Overlay provider-registered cost/limits onto a configured candidate. */
@@ -149,7 +150,8 @@ export async function executeDispatch(options: ExecuteDispatchOptions): Promise<
       : [];
     const tools = validateProbedChildTools(agent.tools, resolvedExtensions.paths, probed);
 
-    const candidates = eligibleCandidates(config, agent, ctx);
+    const quotaState = readQuotaState();
+    const candidates = eligibleCandidates(config, agent, ctx, quotaState);
     eligibleIds = candidates.map((candidate) => modelKey(candidate.identity));
     const request: DelegateRequest = {
       agent,
@@ -161,18 +163,19 @@ export async function executeDispatch(options: ExecuteDispatchOptions): Promise<
       // chooser rather than making it re-infer difficulty from the task text.
       ...(options.complexity ? { complexity: options.complexity } : {}),
       candidates,
+      ...(quotaState && Object.keys(quotaState).length > 0 ? { quotaState } : {}),
       ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
       selectionMode: config.selection,
       allowExternalSensing: config.allowExternalSensing,
       selectionDeadlineMs: config.limits.selectionDeadlineMs,
     };
     const selection = await selectModel(request, {
-      choose: (input: JevChoiceInput) => new JevSelector(quotaSelectorOptions(config.limits.selectionDeadlineMs, config.costMode)).choose(input),
+      choose: (input: JevChoiceInput) => new JevSelector(quotaSelectorOptions(config.limits.selectionDeadlineMs, config.costMode, quotaState)).choose(input),
       signal: controller.signal,
     });
     selectedIdentity = selection.identity;
     selectedSource = selection.source;
-    const revalidated = eligibleCandidates(config, agent, ctx);
+    const revalidated = eligibleCandidates(config, agent, ctx, readQuotaState());
     if (!revalidated.some((candidate) => modelKey(candidate.identity) === modelKey(selection.identity))) {
       throw new Error(`Selected model ${modelKey(selection.identity)} is no longer eligible`);
     }

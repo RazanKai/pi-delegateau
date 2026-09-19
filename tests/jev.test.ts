@@ -47,7 +47,35 @@ describe("JevSelector", () => {
     expect(JSON.stringify(request)).toContain("TASK DATA");
   });
 
-  // F10 regression: known profile metadata (cost/latency/context window/
+  it("passes live headroom to Jev instead of making quota a hidden preference", async () => {
+    const systemOne = vi.fn().mockResolvedValue({ answers: { selected_model: { choice: "beta/strong-1" } } });
+    const selector = new JevSelector({
+      client: { systemOne },
+      timeoutMs: 100,
+      quotaState: {
+        alpha: {
+          provider: "alpha",
+          source: "snapshot",
+          windows: [{ name: "weekly", usedFraction: 0.9, remainingFraction: 0.1 }],
+        },
+        beta: {
+          provider: "beta",
+          source: "snapshot",
+          windows: [{ name: "weekly", usedFraction: 0.2, remainingFraction: 0.8 }],
+        },
+      },
+    });
+    await selector.choose({
+      question: "Which model fits?",
+      candidateIds: ["alpha/fast-1", "beta/strong-1"],
+      state: { task: "t", preference: "balanced", agent: { name: "w", instructions: "i", tools: [] }, candidates: profiles },
+    });
+    const request = systemOne.mock.calls[0]![0] as any;
+    expect(request.questions.selected_model.criteria["alpha/fast-1"]).toContain("alpha quota headroom: weekly 10% remaining");
+    expect(request.questions.selected_model.criteria["beta/strong-1"]).toContain("beta quota headroom: weekly 80% remaining");
+    expect(request.state.providerQuota.alpha.windows[0].remainingFraction).toBe(0.1);
+  });
+
   // provenance) reaches the chooser so routing preferences are interpretable.
   it("forwards known candidate metadata to the chooser", async () => {
     const systemOne = vi.fn().mockResolvedValue({ answers: { selected_model: { choice: "alpha/fast-1" } } });

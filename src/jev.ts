@@ -1,7 +1,7 @@
 import { choice, TypeSafeClient } from "@typesafe-ai/sdk";
 import type { JevChoiceAnswer, JevChoiceInput } from "./types.js";
 import type { ChoiceRuntime } from "./selection.js";
-import { describeCostSignal, resolveCostSignal, type CostModeConfig, type QuotaStore } from "./quota.js";
+import { describeCostSignal, describeProviderQuota, resolveCostSignal, type CostModeConfig, type QuotaState, type QuotaStore } from "./quota.js";
 import { modelKey } from "./types.js";
 
 export interface JevClientLike {
@@ -13,6 +13,8 @@ export class JevSelector implements ChoiceRuntime {
   private readonly timeoutMs: number;
   /** Measured quota coefficients for quota-metered providers, if any exist. */
   private readonly quotaStore: QuotaStore | undefined;
+  /** Per-provider live budget state, if a provider snapshot exists. */
+  private readonly quotaState: QuotaState | undefined;
   /** Per-provider metering overrides from config. */
   private readonly costModeConfig: CostModeConfig | undefined;
 
@@ -21,9 +23,10 @@ export class JevSelector implements ChoiceRuntime {
    * transport failure becomes a normal choose() error inside the selection
    * deadline/fallback logic instead of a constructor throw outside it.
    */
-  constructor(options: { client?: JevClientLike; timeoutMs?: number; quotaStore?: QuotaStore; costModeConfig?: CostModeConfig } = {}) {
+  constructor(options: { client?: JevClientLike; timeoutMs?: number; quotaStore?: QuotaStore; quotaState?: QuotaState; costModeConfig?: CostModeConfig } = {}) {
     this.timeoutMs = options.timeoutMs ?? 2_000;
     this.quotaStore = options.quotaStore;
+    this.quotaState = options.quotaState;
     this.costModeConfig = options.costModeConfig;
     if (options.client) {
       this.client = options.client;
@@ -56,6 +59,9 @@ export class JevSelector implements ChoiceRuntime {
         ...(this.quotaStore ? { quotaStore: this.quotaStore } : {}),
         ...(this.costModeConfig ? { costModeConfig: this.costModeConfig } : {}),
       })));
+      const quotaFact = describeProviderQuota(this.quotaState?.[candidate.identity.provider])
+        ?? `${candidate.identity.provider} quota headroom unknown; do not assume unlimited`;
+      facts.push(quotaFact);
       if (candidate.contextWindow !== undefined) facts.push(`context ${Math.round(candidate.contextWindow / 1000)}K`);
       if (candidate.maxOutputTokens !== undefined) facts.push(`max output ${Math.round(candidate.maxOutputTokens / 1000)}K`);
       if (candidate.reasoning !== undefined) facts.push(candidate.reasoning ? "reasoning-capable" : "no reasoning mode");
@@ -80,7 +86,9 @@ export class JevSelector implements ChoiceRuntime {
         ...(candidate.cost ? { cost: candidate.cost } : {}),
         ...(candidate.latencyMs !== undefined ? { latencyMs: candidate.latencyMs } : {}),
         ...(candidate.contextWindow !== undefined ? { contextWindow: candidate.contextWindow } : {}),
+        ...(candidate.reasoning !== undefined ? { reasoning: candidate.reasoning } : {}),
       })),
+      ...(this.quotaState ? { providerQuota: this.quotaState } : {}),
     };
     const options = {
       ...(input.signal ? { signal: input.signal } : {}),

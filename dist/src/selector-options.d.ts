@@ -1,4 +1,4 @@
-import { type CostModeConfig, type QuotaStore } from "./quota.js";
+import { type CostModeConfig, type QuotaState, type QuotaStore } from "./quota.js";
 /**
  * Build the JevSelector options with the measured quota store attached.
  *
@@ -8,8 +8,9 @@ import { type CostModeConfig, type QuotaStore } from "./quota.js";
  * session's measurement is valid). Reading is synchronous and cheap; a missing
  * or corrupt store degrades to "no quota data" rather than failing selection.
  */
-export declare function quotaSelectorOptions(timeoutMs: number, costModeConfig?: CostModeConfig): {
+export declare function quotaSelectorOptions(timeoutMs: number, costModeConfig?: CostModeConfig, currentQuotaState?: QuotaState): {
     timeoutMs: number;
     quotaStore?: QuotaStore;
+    quotaState?: QuotaState;
     costModeConfig?: CostModeConfig;
 };

@@ -7,7 +7,7 @@ import { DelegationGate, JevDelegationSelector } from "./gate.js";
 import { ModeController, policyForMode } from "./mode.js";
 import { buildRepositoryProfile, describeFailureCost } from "./live-data.js";
 import { quotaSelectorOptions } from "./selector-options.js";
-import { resolveCostMode } from "./quota.js";
+import { resolveCostMode, filterCandidatesByQuota, readQuotaState } from "./quota.js";
 import { isKnownUnreachable, isProbeCacheFresh, probeWorkingDir, readProbeCache, startBackgroundProbe } from "./reachability.js";
 import { appendReceipt, defaultDecisionReceiptPath } from "./receipt-store.js";
 import { buildDecisionReceipt, sanitizeError } from "./receipts.js";
@@ -42,9 +42,9 @@ function configuredAgent(config, name) {
     const pin = config.agentPins[name] ?? agent.model;
     return pin ? { ...agent, model: pin } : agent;
 }
-function eligibleCandidates(config, agent, ctx) {
+function eligibleCandidates(config, agent, ctx, quotaState) {
     const candidates = [];
-    for (const candidate of config.candidates) {
+    for (const candidate of filterCandidatesByQuota(config.candidates, quotaState)) {
         const model = ctx.modelRegistry.find(candidate.identity.provider, candidate.identity.id);
         if (!model || !ctx.modelRegistry.hasConfiguredAuth(model))
             continue;
@@ -63,7 +63,7 @@ function validateChildTools(agent) {
  * the gate's "childAvailable" must mean dispatch can actually launch a child
  * under the same precedence rules.
  */
-function launchableChild(config, agentName, ctx, jevChoose) {
+function launchableChild(config, agentName, ctx, jevChoose, quotaState) {
     const agent = config.agents[agentName];
     if (!agent)
         return undefined;
@@ -75,7 +75,7 @@ function launchableChild(config, agentName, ctx, jevChoose) {
     }
     const pinned = config.agentPins[agentName] ?? agent.model;
     const effectiveAgent = pinned ? { ...agent, model: pinned } : agent;
-    const candidates = eligibleCandidates(config, effectiveAgent, ctx);
+    const candidates = eligibleCandidates(config, effectiveAgent, ctx, quotaState);
     if (candidates.length === 0)
         return undefined;
     const request = {
@@ -118,18 +118,19 @@ function resolveLaunchModelImpl(request, jevChoose) {
 }
 function gateCandidates(config, ctx, jevChoose) {
     const agentNames = [];
+    const providerQuota = readQuotaState();
     let anyLaunchable = false;
     for (const name of Object.keys(config.agents)) {
-        if (launchableChild(config, name, ctx, jevChoose)) {
+        if (launchableChild(config, name, ctx, jevChoose, providerQuota)) {
             agentNames.push(name);
             anyLaunchable = true;
         }
     }
-    const candidates = config.candidates.filter((candidate) => {
+    const candidates = filterCandidatesByQuota(config.candidates, providerQuota).filter((candidate) => {
         const model = ctx.modelRegistry.find(candidate.identity.provider, candidate.identity.id);
         return Boolean(model && ctx.modelRegistry.hasConfiguredAuth(model));
     });
-    return { candidates, childAvailable: anyLaunchable, agentNames };
+    return { candidates, childAvailable: anyLaunchable, agentNames, providerQuota };
 }
 function parentCapabilities(ctx) {
     const model = ctx.model;
@@ -161,6 +162,7 @@ function buildGateInput(config, mode, ctx, prompt, jevChoose) {
         candidates: available.candidates,
         childAvailable: available.childAvailable,
         childAgentNames: available.agentNames,
+        ...(available.providerQuota && Object.keys(available.providerQuota).length > 0 ? { providerQuota: available.providerQuota } : {}),
         allowExternalSensing: config.allowExternalSensing,
         deadlineMs: config.limits.selectionDeadlineMs,
         maxGatePromptChars: config.limits.maxGatePromptChars,

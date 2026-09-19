@@ -1,11 +1,13 @@
 import { choice, TypeSafeClient } from "@typesafe-ai/sdk";
-import { describeCostSignal, resolveCostSignal } from "./quota.js";
+import { describeCostSignal, describeProviderQuota, resolveCostSignal } from "./quota.js";
 import { modelKey } from "./types.js";
 export class JevSelector {
     client;
     timeoutMs;
     /** Measured quota coefficients for quota-metered providers, if any exist. */
     quotaStore;
+    /** Per-provider live budget state, if a provider snapshot exists. */
+    quotaState;
     /** Per-provider metering overrides from config. */
     costModeConfig;
     /**
@@ -16,6 +18,7 @@ export class JevSelector {
     constructor(options = {}) {
         this.timeoutMs = options.timeoutMs ?? 2_000;
         this.quotaStore = options.quotaStore;
+        this.quotaState = options.quotaState;
         this.costModeConfig = options.costModeConfig;
         if (options.client) {
             this.client = options.client;
@@ -49,6 +52,9 @@ export class JevSelector {
                 ...(this.quotaStore ? { quotaStore: this.quotaStore } : {}),
                 ...(this.costModeConfig ? { costModeConfig: this.costModeConfig } : {}),
             })));
+            const quotaFact = describeProviderQuota(this.quotaState?.[candidate.identity.provider])
+                ?? `${candidate.identity.provider} quota headroom unknown; do not assume unlimited`;
+            facts.push(quotaFact);
             if (candidate.contextWindow !== undefined)
                 facts.push(`context ${Math.round(candidate.contextWindow / 1000)}K`);
             if (candidate.maxOutputTokens !== undefined)
@@ -77,7 +83,9 @@ export class JevSelector {
                 ...(candidate.cost ? { cost: candidate.cost } : {}),
                 ...(candidate.latencyMs !== undefined ? { latencyMs: candidate.latencyMs } : {}),
                 ...(candidate.contextWindow !== undefined ? { contextWindow: candidate.contextWindow } : {}),
+                ...(candidate.reasoning !== undefined ? { reasoning: candidate.reasoning } : {}),
             })),
+            ...(this.quotaState ? { providerQuota: this.quotaState } : {}),
         };
         const options = {
             ...(input.signal ? { signal: input.signal } : {}),

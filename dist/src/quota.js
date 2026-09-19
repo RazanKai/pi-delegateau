@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
+/** A provider is not offered once any of its limiting windows has <= 2% left. */
+export const DEFAULT_QUOTA_EXHAUSTION_FLOOR = 0.02;
 /** Read only the credential's SHAPE. Never returns or logs key material. */
 export function detectAuthType(provider) {
     try {
@@ -69,6 +71,159 @@ export function readOllamaUsageSnapshot() {
     catch {
         return undefined;
     }
+}
+function finiteFraction(value) {
+    if (typeof value !== "number" || !Number.isFinite(value))
+        return undefined;
+    return Math.min(Math.max(value, 0), 1);
+}
+function resetAfter(value) {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+function resetAt(value) {
+    return typeof value === "string" && !Number.isNaN(Date.parse(value)) ? value : undefined;
+}
+function unwrapSnapshot(raw) {
+    if (!raw || typeof raw !== "object")
+        return { data: raw };
+    const record = raw;
+    const observedAt = typeof record.ts === "number" && Number.isFinite(record.ts)
+        ? new Date(record.ts).toISOString()
+        : undefined;
+    return { data: record.data ?? raw, ...(observedAt ? { observedAt } : {}) };
+}
+/**
+ * Normalize the two quota response shapes currently used by provider clients:
+ * Ollama's `limits.<bucket>.usage` fraction and Codex's
+ * `rate_limit.*_window.used_percent`. Unknown shapes stay unknown.
+ */
+export function parseProviderQuota(provider, raw) {
+    const unwrapped = unwrapSnapshot(raw);
+    if (!unwrapped.data || typeof unwrapped.data !== "object")
+        return undefined;
+    const data = unwrapped.data;
+    const windows = [];
+    const limits = data.limits;
+    if (limits && typeof limits === "object" && !Array.isArray(limits)) {
+        for (const [name, value] of Object.entries(limits)) {
+            if (!value || typeof value !== "object" || Array.isArray(value))
+                continue;
+            const bucket = value;
+            const usedFraction = finiteFraction(bucket.usage);
+            if (usedFraction === undefined)
+                continue;
+            const after = resetAfter(bucket.reset_after_seconds);
+            const at = resetAt(bucket.reset_at);
+            windows.push({
+                name,
+                usedFraction,
+                remainingFraction: 1 - usedFraction,
+                ...(after !== undefined ? { resetAfterSeconds: after } : {}),
+                ...(at !== undefined ? { resetAt: at } : {}),
+            });
+        }
+    }
+    const rateLimit = data.rate_limit;
+    if (rateLimit && typeof rateLimit === "object" && !Array.isArray(rateLimit)) {
+        for (const [name, value] of Object.entries(rateLimit)) {
+            if (!value || typeof value !== "object" || Array.isArray(value))
+                continue;
+            const window = value;
+            const usedPercent = typeof window.used_percent === "number" && Number.isFinite(window.used_percent)
+                ? Math.min(Math.max(window.used_percent, 0), 100)
+                : undefined;
+            if (usedPercent === undefined)
+                continue;
+            const after = resetAfter(window.reset_after_seconds);
+            const at = resetAt(window.reset_at);
+            windows.push({
+                name,
+                usedFraction: usedPercent / 100,
+                remainingFraction: 1 - usedPercent / 100,
+                ...(after !== undefined ? { resetAfterSeconds: after } : {}),
+                ...(at !== undefined ? { resetAt: at } : {}),
+            });
+        }
+    }
+    if (windows.length === 0)
+        return undefined;
+    return { provider, windows, source: "snapshot", ...(unwrapped.observedAt ? { observedAt: unwrapped.observedAt } : {}) };
+}
+function snapshotProviderName(directoryName) {
+    if (directoryName === "pi-ollama-cloud-link")
+        return "ollama-cloud";
+    return directoryName.startsWith("pi-") ? directoryName.slice(3) : directoryName;
+}
+/**
+ * Read provider-owned quota snapshots without making a network request. Each
+ * provider extension may publish `quota-snapshot.json` or `usage-snapshot.json`
+ * under its cache directory; the existing Ollama extension already publishes the
+ * latter. A missing snapshot is explicitly unknown and never treated as budget.
+ */
+export function readQuotaState(agentDir = getAgentDir()) {
+    const state = {};
+    const cacheDir = path.join(agentDir, "cache");
+    let entries;
+    try {
+        entries = fs.readdirSync(cacheDir, { withFileTypes: true });
+    }
+    catch {
+        return state;
+    }
+    for (const entry of entries) {
+        if (!entry.isDirectory())
+            continue;
+        const provider = snapshotProviderName(entry.name);
+        for (const filename of ["quota-snapshot.json", "usage-snapshot.json"]) {
+            try {
+                const filePath = path.join(cacheDir, entry.name, filename);
+                const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+                const quota = parseProviderQuota(provider, parsed);
+                if (quota) {
+                    state[provider] = quota;
+                    break;
+                }
+            }
+            catch {
+                // A provider cache is optional; continue to the next source/provider.
+            }
+        }
+    }
+    return state;
+}
+export function quotaForProvider(state, provider) {
+    return state?.[provider];
+}
+/** Any limiting window near its cap makes the provider ineligible. */
+export function providerQuotaExhausted(state, provider, floor = DEFAULT_QUOTA_EXHAUSTION_FLOOR) {
+    return Boolean(state?.[provider]?.windows.some((window) => window.remainingFraction <= floor));
+}
+/** Filter hard-unlaunchable providers before a chooser sees the candidates. */
+export function filterCandidatesByQuota(candidates, state, floor = DEFAULT_QUOTA_EXHAUSTION_FLOOR) {
+    return candidates.filter((candidate) => !providerQuotaExhausted(state, candidate.identity.provider, floor));
+}
+function percentRemaining(value) {
+    const rounded = Math.round(value * 1000) / 10;
+    return `${rounded}%`;
+}
+/** Bounded pressure text for Jev; no state means no invented claim. */
+export function describeProviderQuota(quota) {
+    if (!quota || quota.windows.length === 0)
+        return undefined;
+    const ordered = [...quota.windows].sort((a, b) => a.remainingFraction - b.remainingFraction);
+    const tightest = ordered[0];
+    const parts = ordered.map((window) => `${window.name} ${percentRemaining(window.remainingFraction)} remaining`);
+    const reset = tightest.resetAfterSeconds !== undefined
+        ? `, tightest resets in ${Math.round(tightest.resetAfterSeconds)}s`
+        : tightest.resetAt
+            ? `, tightest resets at ${tightest.resetAt}`
+            : "";
+    return `${quota.provider} quota headroom: ${parts.join(", ")}${reset}`;
+}
+/** Render only quota facts for providers represented in a candidate set. */
+export function describeCandidateProviderQuota(candidates, state) {
+    const providers = [...new Set(candidates.map((candidate) => candidate.identity.provider))];
+    return providers.map((provider) => describeProviderQuota(state?.[provider]) ?? `${provider} quota headroom unknown; do not assume unlimited`);
 }
 export function resolveCostMode(provider, config = {}, detectedAuthType, 
 /**

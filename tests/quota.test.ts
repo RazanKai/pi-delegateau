@@ -1,11 +1,16 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   describeCostSignal,
+  describeProviderQuota,
+  filterCandidatesByQuota,
   measurementKey,
+  parseProviderQuota,
+  providerQuotaExhausted,
   quotaUnitsFor,
+  readQuotaState,
   readQuotaStore,
   resolveCostMode,
   resolveCostSignal,
@@ -164,6 +169,51 @@ describe("resolveCostSignal — price is always present, quota is an overlay", (
       { quotaStore: store, authType: "api_key", ollamaUsage: GPU_TIME_USAGE },
     );
     expect(subbed.mode).toBe("quota-gpu-time");
+  });
+});
+
+describe("live provider quota state", () => {
+  it("normalizes Ollama windows and binds on the tightest window", () => {
+    const quota = parseProviderQuota("ollama-cloud", {
+      data: { limits: { session: { usage: 0.111 }, weekly: { usage: 0.962 } } },
+      ts: Date.parse("2026-09-20T00:00:00Z"),
+    });
+    expect(quota?.observedAt).toBe("2026-09-20T00:00:00.000Z");
+    expect(quota?.windows.find((window) => window.name === "session")?.remainingFraction).toBeCloseTo(0.889);
+    expect(quota?.windows.find((window) => window.name === "weekly")?.remainingFraction).toBeCloseTo(0.038);
+    expect(providerQuotaExhausted({ "ollama-cloud": quota! }, "ollama-cloud")).toBe(false);
+    expect(describeProviderQuota(quota)).toContain("weekly 3.8% remaining");
+  });
+
+  it("excludes a provider when either window reaches the hard floor", () => {
+    const state = {
+      ollama: {
+        provider: "ollama-cloud",
+        source: "snapshot" as const,
+        windows: [
+          { name: "session", usedFraction: 0.1, remainingFraction: 0.9 },
+          { name: "weekly", usedFraction: 0.98, remainingFraction: 0.02 },
+        ],
+      },
+    };
+    expect(providerQuotaExhausted(state, "ollama")).toBe(true);
+    expect(filterCandidatesByQuota([
+      { identity: { provider: "ollama", id: "a" } },
+      { identity: { provider: "openai", id: "b" } },
+    ], state).map((candidate) => candidate.identity.provider)).toEqual(["openai"]);
+  });
+
+  it("reads provider snapshots by provider-owned cache directory", () => {
+    const dir = mkdtempSync(join(tmpdir(), "delegateau-quota-snapshot-"));
+    try {
+      const snapshotDir = join(dir, "cache", "pi-ollama-cloud-link");
+      writeFileSync(join(dir, "unused"), "x");
+      mkdirSync(snapshotDir, { recursive: true });
+      writeFileSync(join(snapshotDir, "usage-snapshot.json"), JSON.stringify({ data: GPU_TIME_USAGE, ts: Date.now() }));
+      expect(readQuotaState(dir)["ollama-cloud"]?.windows.map((window) => window.name)).toEqual(["session", "weekly"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

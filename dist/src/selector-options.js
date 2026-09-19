@@ -1,4 +1,4 @@
-import { readQuotaStore } from "./quota.js";
+import { readQuotaState, readQuotaStore } from "./quota.js";
 /**
  * Build the JevSelector options with the measured quota store attached.
  *
@@ -8,17 +8,22 @@ import { readQuotaStore } from "./quota.js";
  * session's measurement is valid). Reading is synchronous and cheap; a missing
  * or corrupt store degrades to "no quota data" rather than failing selection.
  */
-export function quotaSelectorOptions(timeoutMs, costModeConfig) {
+export function quotaSelectorOptions(timeoutMs, costModeConfig, currentQuotaState) {
     let store;
+    let quotaState;
     try {
         store = readQuotaStore();
+        const state = currentQuotaState ?? readQuotaState();
+        quotaState = Object.keys(state).length > 0 ? state : undefined;
     }
     catch {
         store = undefined;
+        quotaState = undefined;
     }
     return {
         timeoutMs,
         ...(store ? { quotaStore: store } : {}),
+        ...(quotaState ? { quotaState } : {}),
         ...(costModeConfig ? { costModeConfig } : {}),
     };
 }

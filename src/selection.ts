@@ -98,6 +98,7 @@ async function chooseWithDeadline(request: DelegateRequest, runtime: ChoiceRunti
           capabilities: [...candidate.capabilities],
           ...(candidate.limitations ? { limitations: [...candidate.limitations] } : {}),
         })),
+        ...(request.quotaState ? { providerQuota: request.quotaState } : {}),
       },
       candidateIds: request.candidates.map((candidate) => modelKey(candidate.identity)),
       question: CHOICE_QUESTION,

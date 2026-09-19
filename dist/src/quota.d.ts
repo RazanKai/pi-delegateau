@@ -50,6 +50,25 @@ export interface CostModeConfig {
     /** Ollama plan discriminator: "gpu-time" (grandfathered) or "credits" (new). */
     ollamaPlan?: "gpu-time" | "credits";
 }
+/** One provider quota bucket, normalized across provider-specific APIs. */
+export interface ProviderQuotaWindow {
+    name: string;
+    usedFraction: number;
+    remainingFraction: number;
+    resetAfterSeconds?: number;
+    resetAt?: string;
+}
+/** Live budget state for one provider account. */
+export interface ProviderQuotaState {
+    provider: string;
+    windows: ProviderQuotaWindow[];
+    source: "snapshot";
+    observedAt?: string;
+}
+/** Provider-keyed quota state. Missing state means unknown, not unlimited. */
+export type QuotaState = Record<string, ProviderQuotaState>;
+/** A provider is not offered once any of its limiting windows has <= 2% left. */
+export declare const DEFAULT_QUOTA_EXHAUSTION_FLOOR = 0.02;
 /** Read only the credential's SHAPE. Never returns or logs key material. */
 export declare function detectAuthType(provider: string): "oauth" | "api_key" | undefined;
 /**
@@ -81,6 +100,32 @@ export declare function detectOllamaPlan(usage: unknown): "gpu-time" | "credits"
  * guess here is only ever a fallback, not a silent default.
  */
 export declare function readOllamaUsageSnapshot(): unknown | undefined;
+/**
+ * Normalize the two quota response shapes currently used by provider clients:
+ * Ollama's `limits.<bucket>.usage` fraction and Codex's
+ * `rate_limit.*_window.used_percent`. Unknown shapes stay unknown.
+ */
+export declare function parseProviderQuota(provider: string, raw: unknown): ProviderQuotaState | undefined;
+/**
+ * Read provider-owned quota snapshots without making a network request. Each
+ * provider extension may publish `quota-snapshot.json` or `usage-snapshot.json`
+ * under its cache directory; the existing Ollama extension already publishes the
+ * latter. A missing snapshot is explicitly unknown and never treated as budget.
+ */
+export declare function readQuotaState(agentDir?: string): QuotaState;
+export declare function quotaForProvider(state: QuotaState | undefined, provider: string): ProviderQuotaState | undefined;
+/** Any limiting window near its cap makes the provider ineligible. */
+export declare function providerQuotaExhausted(state: QuotaState | undefined, provider: string, floor?: number): boolean;
+/** Filter hard-unlaunchable providers before a chooser sees the candidates. */
+export declare function filterCandidatesByQuota<T extends {
+    identity: ModelIdentity;
+}>(candidates: T[], state: QuotaState | undefined, floor?: number): T[];
+/** Bounded pressure text for Jev; no state means no invented claim. */
+export declare function describeProviderQuota(quota: ProviderQuotaState | undefined): string | undefined;
+/** Render only quota facts for providers represented in a candidate set. */
+export declare function describeCandidateProviderQuota(candidates: Array<{
+    identity: ModelIdentity;
+}>, state: QuotaState | undefined): string[];
 export declare function resolveCostMode(provider: string, config?: CostModeConfig, detectedAuthType?: "oauth" | "api_key", 
 /**
  * Ollama usage document. Omit to read the sibling package's snapshot; pass

@@ -8,7 +8,7 @@ import { DelegationGate, JevDelegationSelector, type DelegationDecision, type De
 import { ModeController, policyForMode } from "./mode.js";
 import { buildRepositoryProfile, describeFailureCost } from "./live-data.js";
 import { quotaSelectorOptions } from "./selector-options.js";
-import { resolveCostMode } from "./quota.js";
+import { resolveCostMode, filterCandidatesByQuota, readQuotaState, type QuotaState } from "./quota.js";
 import { isKnownUnreachable, isProbeCacheFresh, probeWorkingDir, readProbeCache, startBackgroundProbe } from "./reachability.js";
 import { appendReceipt, defaultDecisionReceiptPath } from "./receipt-store.js";
 import { buildDecisionReceipt, sanitizeError } from "./receipts.js";
@@ -46,9 +46,9 @@ function configuredAgent(config: DelegateConfig, name: string): TrustedAgent {
   return pin ? { ...agent, model: pin } : agent;
 }
 
-function eligibleCandidates(config: DelegateConfig, agent: TrustedAgent, ctx: ExtensionContext): CandidateProfile[] {
+function eligibleCandidates(config: DelegateConfig, agent: TrustedAgent, ctx: ExtensionContext, quotaState?: QuotaState): CandidateProfile[] {
   const candidates: CandidateProfile[] = [];
-  for (const candidate of config.candidates) {
+  for (const candidate of filterCandidatesByQuota(config.candidates, quotaState)) {
     const model = ctx.modelRegistry.find(candidate.identity.provider, candidate.identity.id);
     if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) continue;
     if (agent.tools.some((tool) => tool === TOOL_NAME || (!CHILD_TOOLS.has(tool) && (agent.childExtensions?.length ?? 0) === 0))) continue;
@@ -72,6 +72,7 @@ function launchableChild(
   agentName: string,
   ctx: ExtensionContext,
   jevChoose?: (input: JevChoiceInput) => Promise<JevChoiceAnswer>,
+  quotaState?: QuotaState,
 ): { candidates: CandidateProfile[]; agent: TrustedAgent; model: ModelIdentity } | undefined {
   const agent = config.agents[agentName];
   if (!agent) return undefined;
@@ -82,7 +83,7 @@ function launchableChild(
   }
   const pinned = config.agentPins[agentName] ?? agent.model;
   const effectiveAgent = pinned ? { ...agent, model: pinned } : agent;
-  const candidates = eligibleCandidates(config, effectiveAgent, ctx);
+  const candidates = eligibleCandidates(config, effectiveAgent, ctx, quotaState);
   if (candidates.length === 0) return undefined;
   const request: DelegateRequest = {
     agent: effectiveAgent,
@@ -123,20 +124,21 @@ function gateCandidates(
   config: DelegateConfig,
   ctx: ExtensionContext,
   jevChoose?: (input: JevChoiceInput) => Promise<JevChoiceAnswer>,
-): { candidates: CandidateProfile[]; childAvailable: boolean; agentNames: string[] } {
+): { candidates: CandidateProfile[]; childAvailable: boolean; agentNames: string[]; providerQuota?: QuotaState } {
   const agentNames: string[] = [];
+  const providerQuota = readQuotaState();
   let anyLaunchable = false;
   for (const name of Object.keys(config.agents)) {
-    if (launchableChild(config, name, ctx, jevChoose)) {
+    if (launchableChild(config, name, ctx, jevChoose, providerQuota)) {
       agentNames.push(name);
       anyLaunchable = true;
     }
   }
-  const candidates = config.candidates.filter((candidate) => {
+  const candidates = filterCandidatesByQuota(config.candidates, providerQuota).filter((candidate) => {
     const model = ctx.modelRegistry.find(candidate.identity.provider, candidate.identity.id);
     return Boolean(model && ctx.modelRegistry.hasConfiguredAuth(model));
   });
-  return { candidates, childAvailable: anyLaunchable, agentNames };
+  return { candidates, childAvailable: anyLaunchable, agentNames, providerQuota };
 }
 
 function parentCapabilities(ctx: ExtensionContext): string[] {
@@ -170,6 +172,7 @@ function buildGateInput(config: DelegateConfig, mode: ModeController, ctx: Exten
     candidates: available.candidates,
     childAvailable: available.childAvailable,
     childAgentNames: available.agentNames,
+    ...(available.providerQuota && Object.keys(available.providerQuota).length > 0 ? { providerQuota: available.providerQuota } : {}),
     allowExternalSensing: config.allowExternalSensing,
     deadlineMs: config.limits.selectionDeadlineMs,
     maxGatePromptChars: config.limits.maxGatePromptChars,

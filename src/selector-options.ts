@@ -1,4 +1,4 @@
-import { readQuotaStore, type CostModeConfig, type QuotaStore } from "./quota.js";
+import { readQuotaState, readQuotaStore, type CostModeConfig, type QuotaState, type QuotaStore } from "./quota.js";
 
 /**
  * Build the JevSelector options with the measured quota store attached.
@@ -12,16 +12,22 @@ import { readQuotaStore, type CostModeConfig, type QuotaStore } from "./quota.js
 export function quotaSelectorOptions(
   timeoutMs: number,
   costModeConfig?: CostModeConfig,
-): { timeoutMs: number; quotaStore?: QuotaStore; costModeConfig?: CostModeConfig } {
+  currentQuotaState?: QuotaState,
+): { timeoutMs: number; quotaStore?: QuotaStore; quotaState?: QuotaState; costModeConfig?: CostModeConfig } {
   let store: QuotaStore | undefined;
+  let quotaState: QuotaState | undefined;
   try {
     store = readQuotaStore();
+    const state = currentQuotaState ?? readQuotaState();
+    quotaState = Object.keys(state).length > 0 ? state : undefined;
   } catch {
     store = undefined;
+    quotaState = undefined;
   }
   return {
     timeoutMs,
     ...(store ? { quotaStore: store } : {}),
+    ...(quotaState ? { quotaState } : {}),
     ...(costModeConfig ? { costModeConfig } : {}),
   };
 }
