@@ -535,7 +535,7 @@ Pi-assisted implementation added an explicit `/delegateau setup` flow and a focu
 projects provider metadata into a reviewable candidate pool, provides the six built-in
 roles (`scout`, `researcher`, `evidence-auditor`, `worker`, `reviewer`, `oracle`),
 enables the web roles when either `pi-web-access` or `donsetch` is installed, preserves exact model IDs, and
-writes `.pi/delegateau.json` only after confirmation. `delegate` is intentionally absent.
+writes `.pi/delegateau.json` only after confirmation.
 
 The setup review is side-effect-free. `/delegateau setup probe` is an explicit sequential
 reachability stage; quota measurement remains opt-in and was not run. External benchmark

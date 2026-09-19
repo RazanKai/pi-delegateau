@@ -541,7 +541,7 @@ A fresh configuration may be empty. Extension import and session start must rema
 
 Reachability probes use the child launch shape, run sequentially, cache classified failures, and are explicit setup stages; missing evidence never removes a candidate. Provider-owned telemetry and credential shape may label access mode, while user overrides remain authoritative. Quota-cost measurement is bounded and opt-in; no measurement occurs against a near-exhausted bucket. External benchmark records include exact identity, source, benchmark/version, date, and provider/independent provenance; incompatible versions cannot establish dominance. Pruning removes confirmed-unreachable models and only proven dominated models; unknowns remain reviewable.
 
-Setup generates `scout`, `researcher`, `evidence-auditor`, `worker`, `reviewer`, and `oracle`, never `delegate`. Web roles require one of the eligible web extensions (`pi-web-access` or `donsetch`); missing extensions make those roles unavailable rather than widening tools. Discovery/cache data stays outside project policy configuration and generated JSON excludes credentials.
+Setup generates `scout`, `researcher`, `evidence-auditor`, `worker`, `reviewer`, and `oracle`. Web roles require one of the eligible web extensions (`pi-web-access` or `donsetch`); missing extensions make those roles unavailable rather than widening tools. Discovery/cache data stays outside project policy configuration and generated JSON excludes credentials.
 
 ### R10 — Evidence and useful scope
 

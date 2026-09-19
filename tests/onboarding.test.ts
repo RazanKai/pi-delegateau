@@ -45,9 +45,8 @@ describe("explicit onboarding", () => {
     evidence[1]!.version = "2";
     expect(pruneSetupCandidates(base, evidence).candidates).toHaveLength(2);
   });
-  it("supports either web extension and never generates delegate children", () => {
+  it("supports either web extension", () => {
     const missing = roleTemplates([]);
-    expect(missing.agents).not.toHaveProperty("delegate");
     expect(missing.agents).not.toHaveProperty("researcher");
     expect(missing.unavailable.join(" ")).toContain("pi-web-access or donsetch");
     expect(roleTemplates(["pi-web-access"]).agents.researcher).toMatchObject({ childExtensions: ["pi-web-access"] });
