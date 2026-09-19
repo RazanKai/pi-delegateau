@@ -17,9 +17,12 @@ and only the task context. The parent keeps control of the overall work.
 - Optionally restricts the parent to coordinating and delegating instead of
   editing directly.
 
-Today the parent decides whether to delegate. The optional Jev-based
-local-versus-delegated decision is specified as a planned follow-up in
-[`docs/SPEC.md`](docs/SPEC.md) and [`docs/DEVPLAN.md`](docs/DEVPLAN.md).
+The parent can use the optional Jev-based local-versus-delegated gate. Set
+`"delegationDecision": "jev-suggest"` for an advisory recommendation or
+`"jev-enforce"` to restrict direct execution when Jev recommends delegation.
+Enforcement fails closed if the decision service is unavailable; `manual` keeps
+normal parent behavior. The decision is request-scoped and does not mutate later
+conversation history.
 
 It does not provide a planner, queue, parallel workers, automatic review, repair
 loop, worktree management, or correctness verdicts.
@@ -55,13 +58,14 @@ configuration looks like this:
 ```json
 {
   "selection": "fixed",
+  "delegationDecision": "manual",
   "defaultModel": { "provider": "openai", "id": "gpt-4.1-mini" },
   "candidates": [
     {
       "provider": "openai",
       "id": "gpt-4.1-mini",
       "description": "Implementation and test work",
-      "capabilities": ["code", "tests"],
+      "capabilities": ["code"],
       "provenance": "user"
     }
   ],
@@ -74,6 +78,33 @@ configuration looks like this:
 }
 ```
 
+Optional fields:
+
+- `childThinking`: fixed thinking level for the child (`off`, `minimal`,
+  `low`, `medium`, `high`, `xhigh`, `max`); passed to the child via
+  `--thinking`.
+- `limits.maxExpectedOutputChars` / `limits.maxGatePromptChars`: bounds for
+  the optional expected-output field and the prompt sent to the Jev
+  delegation gate.
+- `allowedParentTools`: may REMOVE tools from enforced modes but can never
+  re-admit `bash`, `powershell`, `edit`, or `write`; `delegate_task` is
+  always kept.
+
+Trust and safety behavior:
+
+- Delegation is refused when the host reports the project untrusted, before
+  any project config is read or child command spawned.
+- Enforced policies fail closed: a missing TypeSafe key, malformed config,
+  or sensor failure installs a blocked restriction for the request instead of
+  silently degrading.
+- Decision receipts store stable error categories, never raw service error
+  text, so prompt content cannot leak into receipts.
+- Provider-served model evidence (`servedModel`) is recorded alongside the
+  requested model; substitution is disclosed in the tool result.
+
+The child command defaults to `pi`; set `"piCommand": "/absolute/path/to/pi"`
+when testing from a checkout without a globally installed Pi executable.
+
 The parent can then use the `delegate_task` tool with an agent name and a
 self-contained task. The extension starts another Pi process with
 `--no-session`, `--no-extensions`, the chosen model, and the configured child
@@ -82,6 +113,7 @@ tools.
 Useful commands inside Pi:
 
 - `/delegateau status`
+- `/delegateau override local|delegate|manual` (current request only)
 - `/delegateau enable delegate-execution`
 - `/delegateau enable coordinator-only`
 - `/delegateau disable`
@@ -96,9 +128,16 @@ Useful commands inside Pi:
 
 ## Status
 
-The implementation and local tests are complete. The following still require a
-real configured environment: a live provider-backed child run, a credentialed
-Jev-to-child run, descendant-cleanup testing, and a fixed-versus-Jev pilot.
+The implementation, local tests, and the review-fix campaign are complete
+(11 test files / 69 tests, hermetic without credentials). The following still
+require a real configured environment: a live provider-backed child run, a
+credentialed Jev-to-child run, and a fixed-versus-Jev pilot.
+
+Known limitations:
+
+- A competing extension that registers `delegate_task` first shadows this
+  extension; Pi 0.85.1 offers no load-time seam to reject that (Pi emits a
+  diagnostic), and `/delegateau status` reports suspected shadowing.
 
 This project is independently implemented. It does not require `pi-foreman` at
 runtime. See `NOTICE.md` for the ideas and license attribution used during
