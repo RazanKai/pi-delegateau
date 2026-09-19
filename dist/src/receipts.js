@@ -19,7 +19,7 @@ export function classifyError(message) {
     return "sensor-error";
 }
 export function buildDecisionReceipt(decision, outcome) {
-    return JSON.parse(JSON.stringify({
+    return {
         decisionId: decision.decisionId,
         generation: decision.generation,
         policy: decision.policy,
@@ -33,13 +33,13 @@ export function buildDecisionReceipt(decision, outcome) {
         childAgentNames: decision.childAgentNames,
         execution: decision.execution,
         outcome,
-        ...(decision.reason ? { reason: classifyError(decision.reason) ?? sanitizeError(decision.reason) } : {}),
-        ...(decision.invalidationReason ? { invalidationReason: sanitizeError(decision.invalidationReason) } : {}),
+        ...(decision.reason ? { reason: classifyError(decision.reason) } : {}),
+        ...(decision.invalidationReason ? { invalidationReason: classifyError(decision.invalidationReason) } : {}),
         ...(decision.override ? { override: decision.override } : {}),
         ...(decision.confidence !== undefined ? { confidence: decision.confidence } : {}),
         ...(decision.latencyMs !== undefined ? { latencyMs: decision.latencyMs } : {}),
         ...(decision.usage ? { usage: decision.usage } : {}),
-    }));
+    };
 }
 /**
  * Sanitize an error message for display. NOTE: this is for transient UI text
@@ -54,8 +54,11 @@ export function sanitizeError(message, secrets = []) {
     return result.slice(0, 2_000);
 }
 export function buildReceipt(input) {
-    const { task: _task, expectedOutput: _expectedOutput, context: _context, ...safe } = input;
-    return JSON.parse(JSON.stringify(safe));
+    const { task: _task, expectedOutput: _expectedOutput, context: _context, fallbackCause, ...safe } = input;
+    return {
+        ...safe,
+        ...(fallbackCause ? { fallbackCause: classifyError(fallbackCause) } : {}),
+    };
 }
 /** Build a short human-readable dispatch summary including served-model evidence. */
 export function dispatchSummary(result, selectionSource, requested) {

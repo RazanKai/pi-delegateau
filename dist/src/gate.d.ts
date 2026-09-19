@@ -1,4 +1,4 @@
-import type { CandidateProfile, DelegationMode, DelegationPolicy, RoutingPreference } from "./types.js";
+import type { CandidateProfile, ComplexityLevel, DelegationMode, DelegationPolicy, RepositoryProfile, RoutingPreference } from "./types.js";
 export type GateRecommendation = "local" | "delegate";
 export type GateRestriction = "none" | "delegate" | "blocked";
 export type GateSource = "manual" | "policy-determined" | "jev" | "fallback" | "failed" | "user-override" | "cancelled";
@@ -21,6 +21,10 @@ export interface DelegationGateInput {
     allowExternalSensing: boolean;
     deadlineMs: number;
     maxGatePromptChars: number;
+    /** Bounded, non-source repository profile; rate the same request per repo. */
+    repository?: RepositoryProfile;
+    /** Bounded statement of what a wrong answer costs for this assignment. */
+    failureCost?: string;
 }
 export interface DelegationChoiceInput {
     state: {
@@ -32,12 +36,22 @@ export interface DelegationChoiceInput {
         candidates: CandidateProfile[];
         childAvailable: boolean;
         childAgentNames: string[];
+        repository?: RepositoryProfile;
+        failureCost?: string;
     };
     question: string;
+    /** Question text for the complexity judgement, asked in the SAME call. */
+    complexityQuestion: string;
     signal?: AbortSignal;
 }
 export interface DelegationChoiceAnswer {
     recommendation: GateRecommendation;
+    /**
+     * Difficulty of the work. Asked alongside the local-vs-delegate judgement so
+     * one bounded sensing operation yields both — the chooser needs a difficulty
+     * axis, and a three-value cost/quality preference cannot supply one.
+     */
+    complexity?: ComplexityLevel;
     confidence?: number;
     usage?: {
         inputTokens?: number;
@@ -56,6 +70,8 @@ export interface DelegationDecision {
     status: GateStatus;
     restriction: GateRestriction;
     recommendation?: GateRecommendation;
+    /** Difficulty judged in the same sensing call as the recommendation. */
+    complexity?: ComplexityLevel;
     childAvailable: boolean;
     eligibleChildIds: string[];
     childAgentNames: string[];

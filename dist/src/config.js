@@ -4,12 +4,18 @@ import { modelKey } from "./types.js";
 const DEFAULT_LIMITS = {
     selectionDeadlineMs: 2_000,
     childWallTimeMs: 15 * 60_000,
-    childMaxTurns: 40,
+    // 40 was too tight for real multi-file editing work: a child that needs to
+    // read, edit, re-read and verify across several files can exhaust it before
+    // it finishes, which surfaces as a limit-exceeded failure rather than a
+    // completed assignment. Wall time remains the binding safety envelope.
+    childMaxTurns: 120,
     childOutputChars: 50_000,
     maxTaskChars: 20_000,
     maxContextChars: 20_000,
     maxExpectedOutputChars: 20_000,
     maxGatePromptChars: 20_000,
+    concurrency: 3,
+    maxQueueDepth: 20,
 };
 // Tools that execute commands or mutate the repository; excluded from
 // delegate-execution and the enforced "delegate" request restriction.
@@ -36,6 +42,41 @@ function readIdentity(value, name) {
     if (!isRecord(value))
         throw new Error(`${name} must be a provider/model identity`);
     return { provider: readString(value.provider, `${name}.provider`), id: readString(value.id, `${name}.id`) };
+}
+/**
+ * Validate the cost-metering override block. Refuses unknown values rather than
+ * ignoring them: a typo here would silently change which axis the chooser
+ * optimises, and a wrong cost axis is the bug this whole path exists to fix.
+ */
+function readCostMode(value) {
+    if (value === undefined)
+        return undefined;
+    if (!isRecord(value))
+        throw new Error("costMode must be an object");
+    const providers = {};
+    if (value.providers !== undefined) {
+        if (!isRecord(value.providers))
+            throw new Error("costMode.providers must be an object");
+        for (const [provider, mode] of Object.entries(value.providers)) {
+            if (mode !== "token" && mode !== "quota-gpu-time") {
+                throw new Error(`costMode.providers.${provider} must be "token" or "quota-gpu-time"`);
+            }
+            providers[provider] = mode;
+        }
+    }
+    let ollamaPlan;
+    if (value.ollamaPlan !== undefined) {
+        if (value.ollamaPlan !== "gpu-time" && value.ollamaPlan !== "credits") {
+            throw new Error('costMode.ollamaPlan must be "gpu-time" or "credits"');
+        }
+        ollamaPlan = value.ollamaPlan;
+    }
+    if (Object.keys(providers).length === 0 && ollamaPlan === undefined)
+        return undefined;
+    return {
+        ...(Object.keys(providers).length > 0 ? { providers } : {}),
+        ...(ollamaPlan ? { ollamaPlan } : {}),
+    };
 }
 function readCandidate(value, index) {
     if (!isRecord(value))
@@ -75,14 +116,26 @@ function readPositiveInt(value, name, fallback) {
         throw new Error(`${name} must be a positive integer`);
     return value;
 }
-function readChildTools(value, name) {
-    const tools = Array.isArray(value)
-        ? value.filter((item) => typeof item === "string" && item.length > 0)
-        : [];
-    const invalid = tools.filter((tool) => !CHILD_TOOLS.has(tool));
+function readNonNegativeInt(value, name, fallback) {
+    if (value === undefined)
+        return fallback;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0)
+        throw new Error(`${name} must be a non-negative integer`);
+    return value;
+}
+function readStringArray(value, name) {
+    if (value === undefined)
+        return [];
+    if (!Array.isArray(value))
+        throw new Error(`${name} must be an array`);
+    return [...new Set(value.map((item, index) => readString(item, `${name}[${index}]`)))];
+}
+function readChildTools(value, name, hasExtensions) {
+    const tools = readStringArray(value, `${name}.tools`);
+    const invalid = tools.filter((tool) => tool === "delegate_task" || (!CHILD_TOOLS.has(tool) && !hasExtensions));
     if (invalid.length > 0)
         throw new Error(`${name} tools are not approved child tools: ${invalid.join(", ")}`);
-    return [...new Set(tools)];
+    return tools;
 }
 /**
  * Intersect a configured parent allowlist with a safe maximum. The user may
@@ -127,10 +180,12 @@ export function parseConfig(raw) {
     for (const [name, value] of Object.entries(agentsInput)) {
         if (!isRecord(value))
             throw new Error(`agents.${name} must be an object`);
+        const childExtensions = readStringArray(value.childExtensions, `agents.${name}.childExtensions`);
         const agent = {
             name,
             instructions: readString(value.instructions, `agents.${name}.instructions`),
-            tools: readChildTools(value.tools, `agents.${name}`),
+            tools: readChildTools(value.tools, `agents.${name}`, childExtensions.length > 0),
+            childExtensions,
             ...(value.model === undefined ? {} : { model: readIdentity(value.model, `agents.${name}.model`) }),
         };
         agents[name] = agent;
@@ -149,6 +204,8 @@ export function parseConfig(raw) {
         maxContextChars: readPositiveInt(limitsInput.maxContextChars, "maxContextChars", DEFAULT_LIMITS.maxContextChars),
         maxExpectedOutputChars: readPositiveInt(limitsInput.maxExpectedOutputChars, "maxExpectedOutputChars", DEFAULT_LIMITS.maxExpectedOutputChars),
         maxGatePromptChars: readPositiveInt(limitsInput.maxGatePromptChars, "maxGatePromptChars", DEFAULT_LIMITS.maxGatePromptChars),
+        concurrency: readPositiveInt(limitsInput.concurrency, "concurrency", DEFAULT_LIMITS.concurrency),
+        maxQueueDepth: readNonNegativeInt(limitsInput.maxQueueDepth, "maxQueueDepth", DEFAULT_LIMITS.maxQueueDepth),
     };
     const allowedInput = isRecord(input.allowedParentTools) ? input.allowedParentTools : {};
     const readTools = (value) => Array.isArray(value) ? value.filter((item) => typeof item === "string" && item.length > 0) : [];
@@ -156,6 +213,9 @@ export function parseConfig(raw) {
     if (childThinking !== undefined && !THINKING_LEVELS.includes(childThinking)) {
         throw new Error(`childThinking must be one of: ${THINKING_LEVELS.join(", ")}`);
     }
+    // Cost-metering overrides. Kept small and validated: a typo here would silently
+    // change which axis the chooser optimises, which is worse than refusing to load.
+    const costMode = readCostMode(input.costMode);
     return {
         selection,
         delegationDecision,
@@ -172,6 +232,7 @@ export function parseConfig(raw) {
         },
         limits,
         ...(childThinking ? { childThinking } : {}),
+        ...(costMode ? { costMode } : {}),
         ...(typeof input.receiptPath === "string" && input.receiptPath ? { receiptPath: input.receiptPath } : {}),
         ...(typeof input.decisionReceiptPath === "string" && input.decisionReceiptPath ? { decisionReceiptPath: input.decisionReceiptPath } : {}),
         ...(typeof input.piCommand === "string" && input.piCommand ? { piCommand: input.piCommand } : {}),

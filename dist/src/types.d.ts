@@ -14,16 +14,62 @@ export interface CandidateProfile {
     limitations?: string[];
     provenance: "built-in" | "user";
     contextWindow?: number;
+    /**
+     * Per-1M-token prices. Where a value came from now matters as much as the
+     * number: a config-authored figure is a guess by a human, while a
+     * provider-registered figure is the live catalog's own data. `costSource`
+     * records which, so a guessed price is never presented to the chooser as
+     * authoritative.
+     */
     cost?: {
         input?: number;
         output?: number;
+        cacheRead?: number;
     };
+    costSource?: "provider" | "user";
     latencyMs?: number;
+    maxOutputTokens?: number;
+    /** Provider-declared reasoning capability, when known. */
+    reasoning?: boolean;
+    /** Provider-declared accepted input modalities, when known. */
+    inputModalities?: string[];
+}
+/**
+ * Complexity of the work, modelled on the six-level classification used by
+ * subscription-aware routers (see pkg-research notes). An ordinal scale gives
+ * the chooser a difficulty axis that a three-value cost/quality preference
+ * cannot express: "balanced" says nothing about whether a rename or a
+ * cross-service migration is being routed.
+ */
+export type ComplexityLevel = "trivial" | "simple" | "moderate" | "advanced" | "complex" | "frontier";
+/** Thinking effort conventionally paired with each level. */
+export declare const COMPLEXITY_EFFORT: Readonly<Record<ComplexityLevel, ThinkingLevel>>;
+export declare const COMPLEXITY_LEVELS: readonly ComplexityLevel[];
+/**
+ * Bounded, non-source repository profile so the same request can rate
+ * differently in a small app than in a monorepo. Never carries file contents
+ * or conversation history.
+ */
+export interface RepositoryProfile {
+    /** Top-level and second-level directory names (names only). */
+    directories: string[];
+    fileCount?: number;
+    /** package.json name/scripts/dependency COUNT — never dependency contents. */
+    manifest?: {
+        name?: string;
+        scriptNames: string[];
+        dependencyCount: number;
+    };
+    /** Names of loaded context files (AGENTS.md/CLAUDE.md), not their contents. */
+    contextFileNames: string[];
+    /** True when the workspace is not a git repository. */
+    nonGit?: boolean;
 }
 export interface TrustedAgent {
     name: string;
     instructions: string;
     tools: string[];
+    childExtensions?: string[];
     model?: ModelIdentity;
 }
 export interface DelegateRequest {
@@ -32,6 +78,12 @@ export interface DelegateRequest {
     expectedOutput?: string;
     context?: string;
     preference: RoutingPreference;
+    /**
+     * Difficulty judged by the gate for this same request. Supplied to the
+     * chooser as a defined axis, because `preference` alone ("balanced") says
+     * nothing about whether a rename or a cross-service migration is being routed.
+     */
+    complexity?: ComplexityLevel;
     candidates: CandidateProfile[];
     defaultModel?: ModelIdentity;
     selectionMode: SelectionMode;
@@ -49,6 +101,9 @@ export interface JevChoiceInput {
             tools: string[];
         };
         preference: RoutingPreference;
+        complexity?: ComplexityLevel;
+        /** Thinking effort the gate's level implies, when a level is known. */
+        suggestedEffort?: ThinkingLevel;
         candidates: CandidateProfile[];
     };
     candidateIds: string[];
@@ -81,6 +136,7 @@ export interface ChildRequest {
     context?: string;
     instructions: string;
     tools: string[];
+    extensionPaths?: string[];
     cwd: string;
     thinking?: ThinkingLevel;
     signal?: AbortSignal;
@@ -136,6 +192,8 @@ export interface DelegateLimits {
     maxContextChars: number;
     maxExpectedOutputChars: number;
     maxGatePromptChars: number;
+    concurrency: number;
+    maxQueueDepth: number;
 }
 export interface DelegateConfig {
     selection: SelectionMode;
@@ -153,6 +211,17 @@ export interface DelegateConfig {
     };
     limits: DelegateLimits;
     childThinking?: ThinkingLevel;
+    /**
+     * Per-provider cost-metering overrides. Normally unnecessary — the extension
+     * detects a subscription vs an API key from the credential's shape — but needed
+     * where the auth shape does not determine the plan: an Ollama subscription can
+     * be the grandfathered GPU-time tier OR the credit-based tier, and only the
+     * user knows which.
+     */
+    costMode?: {
+        providers?: Record<string, "token" | "quota-gpu-time">;
+        ollamaPlan?: "gpu-time" | "credits";
+    };
     receiptPath?: string;
     decisionReceiptPath?: string;
     piCommand?: string;

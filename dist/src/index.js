@@ -1,23 +1,31 @@
-import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import { DispatchAdmission } from "./admission.js";
 import { loadConfig, CONFIG_FILE_NAME, CHILD_TOOLS } from "./config.js";
+import { DispatchFailure, executeDispatch, validateAssignment, validateConfiguredChildTools } from "./dispatch.js";
 import { JevSelector } from "./jev.js";
 import { DelegationGate, JevDelegationSelector } from "./gate.js";
 import { ModeController, policyForMode } from "./mode.js";
-import { PiProcessSpawner } from "./pi-process.js";
-import { appendReceipt, defaultDecisionReceiptPath, defaultReceiptPath } from "./receipt-store.js";
-import { buildDecisionReceipt, buildReceipt, classifyError, dispatchSummary, sanitizeError } from "./receipts.js";
-import { selectModel } from "./selection.js";
-import { ChildRunner } from "./runner.js";
+import { buildRepositoryProfile, describeFailureCost } from "./live-data.js";
+import { quotaSelectorOptions } from "./selector-options.js";
+import { resolveCostMode } from "./quota.js";
+import { isKnownUnreachable, isProbeCacheFresh, probeWorkingDir, readProbeCache, startBackgroundProbe } from "./reachability.js";
+import { appendReceipt, defaultDecisionReceiptPath } from "./receipt-store.js";
+import { buildDecisionReceipt, sanitizeError } from "./receipts.js";
 import { modelKey } from "./types.js";
 const TOOL_NAME = "delegate_task";
-const DelegateTaskParams = Type.Object({
+const AssignmentParams = Type.Object({
     agent: Type.String({ description: "Name of a configured trusted child agent" }),
     task: Type.String({ description: "One self-contained assignment for the child" }),
     expectedOutput: Type.Optional(Type.String({ description: "Optional acceptance or output description" })),
     context: Type.Optional(Type.String({ description: "Optional bounded context; not a permission grant" })),
 });
+const DelegateTaskParams = Type.Object({
+    agent: Type.Optional(Type.String({ description: "Name of a configured trusted child agent (single form)" })),
+    task: Type.Optional(Type.String({ description: "One self-contained assignment (single form)" })),
+    expectedOutput: Type.Optional(Type.String({ description: "Optional acceptance or output description (single form)" })),
+    context: Type.Optional(Type.String({ description: "Optional bounded context; not a permission grant (single form)" })),
+    assignments: Type.Optional(Type.Array(AssignmentParams, { minItems: 1, description: "Batch of independent assignments" })),
+}, { additionalProperties: false });
 /** Error thrown so Pi's tool-result machinery marks the call as failed (F12). */
 class DelegationToolError extends Error {
     payload;
@@ -34,46 +42,21 @@ function configuredAgent(config, name) {
     const pin = config.agentPins[name] ?? agent.model;
     return pin ? { ...agent, model: pin } : agent;
 }
-function validateAssignment(config, params) {
-    if (params.task.trim() === "")
-        throw new DelegationToolError({ text: "task must not be empty", details: { status: "launch-error", error: "empty-task" } });
-    if (params.task.length > config.limits.maxTaskChars)
-        throw new DelegationToolError({ text: `task exceeds ${config.limits.maxTaskChars} characters`, details: { status: "launch-error", error: "task-too-large" } });
-    if (params.context && params.context.length > config.limits.maxContextChars) {
-        throw new DelegationToolError({ text: `context exceeds ${config.limits.maxContextChars} characters`, details: { status: "launch-error", error: "context-too-large" } });
-    }
-    if (params.expectedOutput && params.expectedOutput.length > config.limits.maxExpectedOutputChars) {
-        throw new DelegationToolError({ text: `expectedOutput exceeds ${config.limits.maxExpectedOutputChars} characters`, details: { status: "launch-error", error: "expected-output-too-large" } });
-    }
-}
 function eligibleCandidates(config, agent, ctx) {
     const candidates = [];
     for (const candidate of config.candidates) {
         const model = ctx.modelRegistry.find(candidate.identity.provider, candidate.identity.id);
         if (!model || !ctx.modelRegistry.hasConfiguredAuth(model))
             continue;
-        if (agent.tools.some((tool) => !CHILD_TOOLS.has(tool) || tool === TOOL_NAME))
+        if (agent.tools.some((tool) => tool === TOOL_NAME || (!CHILD_TOOLS.has(tool) && (agent.childExtensions?.length ?? 0) === 0)))
             continue;
         candidates.push(candidate);
     }
     return candidates;
 }
 function validateChildTools(agent) {
-    const invalid = agent.tools.filter((tool) => !CHILD_TOOLS.has(tool) || tool === TOOL_NAME);
-    if (invalid.length > 0)
-        throw new DelegationToolError({ text: `Child tools are not approved: ${invalid.join(", ")}`, details: { status: "launch-error", error: "invalid-child-tools" } });
+    validateConfiguredChildTools(agent);
     return [...new Set(agent.tools)];
-}
-/**
- * Profile version covers full profile content, not just identity (IDs alone
- * cannot detect changed prices/capabilities text).
- */
-function profileVersion(config) {
-    const digest = config.candidates
-        .map((candidate) => JSON.stringify(candidate))
-        .sort()
-        .join("|");
-    return `v1:${digest}`;
 }
 /**
  * Shared launchability resolver used by BOTH the gate and dispatch (F09):
@@ -181,20 +164,63 @@ function buildGateInput(config, mode, ctx, prompt, jevChoose) {
         allowExternalSensing: config.allowExternalSensing,
         deadlineMs: config.limits.selectionDeadlineMs,
         maxGatePromptChars: config.limits.maxGatePromptChars,
+        // Bounded, non-source repository profile so the same request can rate
+        // differently in a small app than in a monorepo. Names and counts only —
+        // never file contents, never conversation history.
+        repository: buildRepositoryProfile(ctx.cwd, contextFileNames(ctx)),
+        // Second half of `expected cost = token cost + P(failure) x cost of
+        // failure`: say plainly what a wrong answer costs here.
+        failureCost: describeFailureCost({
+            ...(readOnlyWorkspace(mode) ? { readOnly: true } : {}),
+        }),
     };
+}
+/** Whether the active mode forbids direct mutation, i.e. work is read-only here. */
+function readOnlyWorkspace(mode) {
+    return mode.current() !== "normal";
+}
+/**
+ * Models worth probing: the configured pool. Probing every registry entry would
+ * waste calls on models this configuration never offers, and the pool is
+ * exactly the set whose reachability changes a decision.
+ */
+function reachabilityTargets(config, ctx) {
+    const targets = [];
+    for (const candidate of config.candidates) {
+        try {
+            const model = ctx.modelRegistry.find(candidate.identity.provider, candidate.identity.id);
+            if (!model || !ctx.modelRegistry.hasConfiguredAuth(model))
+                continue;
+            targets.push(candidate.identity);
+        }
+        catch {
+            // An unreadable registry entry is simply not probed.
+        }
+    }
+    return targets;
+}
+/**
+ * Names of Pi-loaded context files (AGENTS.md / CLAUDE.md). Names only: the
+ * profile exists to size the repository, not to ship its contents to a sensor.
+ */
+function contextFileNames(ctx) {
+    try {
+        const prompt = typeof ctx.getSystemPrompt === "function" ? ctx.getSystemPrompt() : "";
+        const found = [];
+        for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+            if (typeof prompt === "string" && prompt.includes(name))
+                found.push(name);
+        }
+        return found;
+    }
+    catch {
+        return [];
+    }
 }
 function statusText(config, mode) {
     const candidates = config.candidates.map((candidate) => modelKey(candidate.identity)).join(", ") || "none";
     const agents = Object.keys(config.agents).join(", ") || "none";
     return `pi-delegateau: mode=${mode}, selection=${config.selection}, preference=${config.preference}, agents=${agents}, configured candidates=${candidates}, Jev disclosure=${config.allowExternalSensing ? "allowed" : "prohibited"}`;
-}
-async function writeSafeReceipt(config, input, notify) {
-    try {
-        await appendReceipt(config.receiptPath ?? defaultReceiptPath(), buildReceipt(input));
-    }
-    catch (error) {
-        notify(`Receipt warning: ${sanitizeError(error instanceof Error ? error.message : String(error))}`);
-    }
 }
 async function writeDecisionReceipt(config, decision, outcome, notify) {
     try {
@@ -228,6 +254,9 @@ export default function (pi) {
         getAllTools: () => pi.getAllTools(),
     });
     const activeDispatches = new Set();
+    // Handle for the background reachability probe, so session shutdown can kill
+    // any outstanding probe process (idempotent teardown).
+    let probeHandle;
     const gate = new DelegationGate();
     let shadowedDelegateTaskCalls = false;
     // Duplicate-tool guard (F20/SPEC §3): Pi's loader keeps the FIRST
@@ -254,178 +283,86 @@ export default function (pi) {
     pi.registerTool({
         name: TOOL_NAME,
         label: "Delegate task",
-        description: "Delegate one self-contained assignment to a configured trusted child. The child runs in isolated context on one selected model.",
-        promptSnippet: "Delegate one self-contained assignment to a trusted child agent",
+        description: "Delegate one assignment or a batch of independent assignments to configured trusted children. Dispatches use a bounded parallel pool and FIFO queue.",
+        promptSnippet: "Delegate one or more self-contained assignments to trusted child agents",
         promptGuidelines: ["Use delegate_task for an assignment that should run on a separately selected child model; the parent owns acceptance."],
         parameters: DelegateTaskParams,
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
-            // Project trust gate (F03): repository-controlled executable policy may
-            // only be consumed from a project the host has marked trusted.
             if (typeof ctx.isProjectTrusted === "function" && !ctx.isProjectTrusted()) {
                 throw new DelegationToolError({
-                    text: "Delegation is unavailable: this project is not trusted. Trust the project in Pi (or move delegateau.json to a trusted location) first.",
+                    text: "Delegation is unavailable: this project is not trusted. Trust the project in Pi first.",
                     details: { status: "launch-error", error: "project-not-trusted" },
                 });
             }
             const config = loadConfig(ctx.cwd);
-            validateAssignment(config, params);
-            const agent = configuredAgent(config, params.agent);
-            const tools = validateChildTools(agent);
-            if (signal?.aborted) {
+            admission.configure(config.limits.concurrency, config.limits.maxQueueDepth);
+            const hasBatch = params.assignments !== undefined;
+            const hasSingle = params.agent !== undefined || params.task !== undefined || params.expectedOutput !== undefined || params.context !== undefined;
+            if (hasBatch === hasSingle) {
+                throw new DelegationToolError({
+                    text: "Use either the single agent/task form or assignments, not both",
+                    details: { status: "launch-error", error: "invalid-assignment-form" },
+                });
+            }
+            const assignments = hasBatch
+                ? params.assignments
+                : [{ agent: params.agent, task: params.task, ...(params.expectedOutput ? { expectedOutput: params.expectedOutput } : {}), ...(params.context ? { context: params.context } : {}) }];
+            if (assignments.length === 0 || !admission.canAccept(assignments.length)) {
+                throw new DelegationToolError({
+                    text: `Delegation batch of ${assignments.length} exceeds the available slots plus queue capacity`,
+                    details: { status: "queue-full", assignments: assignments.length },
+                });
+            }
+            const prepared = assignments.map((assignment) => {
+                if (!assignment.agent || typeof assignment.task !== "string") {
+                    throw new DelegationToolError({ text: "Every assignment requires agent and task", details: { status: "launch-error", error: "invalid-assignment" } });
+                }
+                validateAssignment(config, assignment);
+                const agent = configuredAgent(config, assignment.agent);
+                validateConfiguredChildTools(agent);
+                return { assignment, agent };
+            });
+            if (signal?.aborted)
                 throw new DelegationToolError({ text: "Delegation cancelled before launch", details: { status: "cancelled" } });
-            }
-            const lease = admission.acquire();
-            if (!lease.ok) {
-                throw new DelegationToolError({ text: `Busy: ${lease.reason}`, details: { status: "busy" } });
-            }
-            const dispatchId = randomUUID();
-            // Capture the owning decision at admission (F13): later gate changes
-            // cannot steal or lose this dispatch's link.
             const owningDecision = gate.current();
             const owningDecisionId = owningDecision?.decisionId;
-            let selectedIdentity;
-            let selectedSource;
-            let eligibleIds = [];
-            let receiptAttempted = false;
-            const dispatchController = new AbortController();
-            const forwardAbort = () => dispatchController.abort();
-            if (signal?.aborted)
-                dispatchController.abort();
-            signal?.addEventListener("abort", forwardAbort, { once: true });
-            activeDispatches.add(dispatchController);
-            try {
-                onUpdate?.({ content: [{ type: "text", text: `[${dispatchId}] resolving eligible models...` }], details: { dispatchId, status: "selecting" } });
-                const candidates = eligibleCandidates(config, agent, ctx);
-                eligibleIds = candidates.map((candidate) => modelKey(candidate.identity));
-                const request = {
-                    agent,
-                    task: params.task,
-                    ...(params.expectedOutput ? { expectedOutput: params.expectedOutput } : {}),
-                    ...(params.context ? { context: params.context } : {}),
-                    preference: config.preference,
-                    candidates,
-                    ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
-                    selectionMode: config.selection,
-                    allowExternalSensing: config.allowExternalSensing,
-                    selectionDeadlineMs: config.limits.selectionDeadlineMs,
-                };
-                const chooser = {
-                    choose: (input) => new JevSelector({ timeoutMs: config.limits.selectionDeadlineMs }).choose(input),
-                    signal: dispatchController.signal,
-                };
-                const selection = await selectModel(request, chooser);
-                selectedIdentity = selection.identity;
-                selectedSource = selection.source;
-                const revalidated = eligibleCandidates(config, agent, ctx);
-                if (!revalidated.some((candidate) => modelKey(candidate.identity) === modelKey(selection.identity))) {
-                    throw new Error(`Selected model ${modelKey(selection.identity)} is no longer eligible`);
-                }
-                const runner = new ChildRunner(new PiProcessSpawner({ ...(config.piCommand ? { command: config.piCommand } : {}) }));
-                onUpdate?.({ content: [{ type: "text", text: `[${dispatchId}] ${dispatchSummaryPreview(selection)}; child starting...` }], details: { dispatchId, status: "running", selection } });
-                const result = await runner.run({
-                    model: selection.identity,
-                    task: params.task,
-                    ...(params.expectedOutput ? { expectedOutput: params.expectedOutput } : {}),
-                    ...(params.context ? { context: params.context } : {}),
-                    instructions: agent.instructions,
-                    tools,
-                    cwd: ctx.cwd,
-                    ...(config.childThinking ? { thinking: config.childThinking } : {}),
-                    signal: dispatchController.signal,
-                    wallTimeMs: config.limits.childWallTimeMs,
-                    maxTurns: config.limits.childMaxTurns,
-                    maxOutputChars: config.limits.childOutputChars,
-                }, (text) => onUpdate?.({ content: [{ type: "text", text: `[${dispatchId}] ${text}` }], details: { dispatchId, status: "running" } }));
-                receiptAttempted = true;
-                // Truthful admission semantics (F04/F08): a started child without
-                // observed exit, or a group we could not confirm clean, blocks the
-                // next dispatch instead of silently reopening.
-                if (result.processStarted && (!result.observedExit || result.groupCleaned === false)) {
-                    lease.blocked("child exit or process-group cleanup not observed; manual recovery required");
-                }
-                // Only claim delegated execution once a child actually started (F13).
-                if (result.processStarted)
-                    gate.markExecution("delegated");
-                await writeSafeReceipt(config, {
-                    dispatchId,
-                    ...(owningDecisionId ? { decisionId: owningDecisionId } : {}),
-                    agent: agent.name,
-                    identity: result.appliedModel,
-                    ...(result.servedModel ? { servedModel: result.servedModel } : {}),
-                    ...(selection.identity ? { requestedModel: selection.identity } : {}),
-                    source: selection.source,
-                    preference: config.preference,
-                    eligibleIds: candidates.map((candidate) => modelKey(candidate.identity)),
-                    profileVersion: profileVersion(config),
-                    outcome: result.status,
-                    ...(selection.probabilities ? { selectionProbabilities: selection.probabilities } : {}),
-                    ...(selection.confidence !== undefined ? { confidence: selection.confidence } : {}),
-                    ...(selection.chooserLatencyMs !== undefined ? { chooserLatencyMs: selection.chooserLatencyMs } : {}),
-                    ...(selection.cause ? { fallbackCause: classifyError(selection.cause) ?? "sensor-error" } : {}),
-                    usage: { chooser: selection.usage, child: result.usage },
-                    ...(result.error ? { errorCategory: result.status } : {}),
-                    ...(result.groupCleaned !== undefined ? { groupCleaned: result.groupCleaned } : {}),
-                    ...(result.outputTruncated ? { outputTruncated: true } : {}),
-                }, (message) => ctx.ui.notify(message, "warning"));
-                const summary = dispatchSummary(result, selection.source, selection.identity);
-                const details = {
-                    dispatchId,
-                    status: result.status,
-                    agent: agent.name,
-                    selectedModel: selection.identity,
-                    appliedModel: result.appliedModel,
-                    ...(result.servedModel ? { servedModel: result.servedModel } : {}),
-                    selectionSource: selection.source,
-                    output: result.output,
-                    error: result.error,
-                    ...(result.outputTruncated ? { outputTruncated: true } : {}),
-                };
-                const text = [
-                    `Dispatch ${dispatchId}: ${result.status}`,
-                    `Agent: ${agent.name}`,
-                    `Selection: ${summary}`,
-                    result.outputTruncated ? "Output was truncated to the configured limit; the tail is shown." : "",
-                    result.error ? `Error: ${result.error}` : "",
-                    "Child output:",
-                    result.output || "(no output)",
-                ].filter(Boolean).join("\n");
-                // Non-success results are surfaced as Pi tool errors via the thrown
-                // DelegationToolError (F12): Pi marks fulfilled executes as
-                // non-errors, so the error channel must be the exception.
-                if (result.status !== "success") {
-                    throw new DelegationToolError({ text, details });
-                }
-                return { content: [{ type: "text", text }], details };
+            // The gate's difficulty judgement rides along with its decision id: the
+            // chooser should not have to re-infer difficulty from raw task text when
+            // the same request was just classified.
+            const owningComplexity = owningDecision?.complexity;
+            const settled = await Promise.allSettled(prepared.map(({ assignment, agent }) => executeDispatch({
+                config,
+                agent,
+                assignment,
+                ctx,
+                pool: admission,
+                ...(signal ? { signal } : {}),
+                ...(onUpdate ? { onUpdate } : {}),
+                ...(owningDecisionId ? { decisionId: owningDecisionId } : {}),
+                ...(owningComplexity ? { complexity: owningComplexity } : {}),
+                registerController: (controller) => activeDispatches.add(controller),
+                unregisterController: (controller) => activeDispatches.delete(controller),
+                markDelegated: () => gate.markExecution("delegated"),
+            })));
+            const results = settled.map((item) => item.status === "fulfilled"
+                ? { ok: true, result: item.value }
+                : { ok: false, error: item.reason instanceof DispatchFailure ? item.reason.payload : { text: sanitizeError(String(item.reason)), details: { status: "launch-error" } } });
+            if (!hasBatch) {
+                const only = results[0];
+                if (!only.ok)
+                    throw new DelegationToolError(only.error);
+                return only.result;
             }
-            catch (error) {
-                const message = sanitizeError(error instanceof Error ? error.message : String(error));
-                if (!receiptAttempted) {
-                    receiptAttempted = true;
-                    await writeSafeReceipt(config, {
-                        dispatchId,
-                        ...(owningDecisionId ? { decisionId: owningDecisionId } : {}),
-                        agent: agent.name,
-                        ...(selectedIdentity ? { identity: selectedIdentity } : {}),
-                        ...(selectedSource ? { source: selectedSource } : {}),
-                        preference: config.preference,
-                        eligibleIds,
-                        profileVersion: profileVersion(config),
-                        outcome: dispatchController.signal.aborted ? "cancelled" : "launch-error",
-                        errorCategory: selectedIdentity ? "execution" : "selection",
-                    }, (receiptMessage) => ctx.ui.notify(receiptMessage, "warning"));
-                }
-                if (dispatchController.signal.aborted) {
-                    throw new DelegationToolError({ text: `Dispatch ${dispatchId}: cancelled`, details: { dispatchId, status: "cancelled" } });
-                }
-                if (error instanceof DelegationToolError)
-                    throw error;
-                throw new DelegationToolError({ text: `Dispatch ${dispatchId}: launch-error\n${message}`, details: { dispatchId, status: "launch-error", error: message } });
-            }
-            finally {
-                signal?.removeEventListener("abort", forwardAbort);
-                activeDispatches.delete(dispatchController);
-                lease.release();
-            }
+            const details = {
+                status: results.every((result) => result.ok) ? "success" : "partial-failure",
+                dispatches: results.map((result) => result.ok ? result.result.details : result.error.details),
+            };
+            const text = results.map((result, index) => result.ok
+                ? `Assignment ${index + 1}: ${String(result.result.details.status)} (${String(result.result.details.dispatchId)})`
+                : `Assignment ${index + 1}: ${result.error.text}`).join("\n\n");
+            if (!results.every((result) => result.ok))
+                throw new DelegationToolError({ text, details });
+            return { content: [{ type: "text", text }], details };
         },
     });
     pi.registerCommand("delegateau", {
@@ -436,14 +373,13 @@ export default function (pi) {
             const config = loadConfig(ctx.cwd);
             mode.setAllowedTools("delegate-execution", config.allowedParentTools.delegateExecution);
             mode.setAllowedTools("coordinator-only", config.allowedParentTools.coordinatorOnly);
+            admission.configure(config.limits.concurrency, config.limits.maxQueueDepth);
             if (command === "status") {
                 const decision = gate.current();
                 const decisionText = decision ? `, gate=${decision.status}/${decision.source}${decision.recommendation ? `:${decision.recommendation}` : ""}` : "";
-                // Admission visibility (F23): a blocked dispatch is a standing state
-                // the user must be able to see from status, not just a busy error on
-                // the next attempt.
-                const busy = admission.isBusy();
-                const busyText = busy ? `, admission=busy${admission.reason() ? ` (${admission.reason()})` : ""}` : ", admission=idle";
+                const pool = admission.status();
+                const blockedReasons = pool.blockedReasons.length > 0 ? ` (${pool.blockedReasons.join("; ")})` : "";
+                const busyText = `, slots=${pool.occupied}/${pool.concurrency} running=${pool.running} blocked=${pool.blocked}${blockedReasons}, queue=${pool.queued}/${pool.maxQueueDepth}`;
                 const shadowText = shadowedDelegateTaskCalls ? ", tool-shadowing=suspected (delegate_task resolved outside this extension; check for a competing extension)" : "";
                 ctx.ui.notify(`${statusText(config, mode.current())}, delegation decision=${config.delegationDecision}${decisionText}${busyText}${shadowText}`, "info");
                 return;
@@ -547,7 +483,7 @@ export default function (pi) {
         try {
             const selector = buildGateSelector(config);
             const jevChoose = config.selection === "jev" && config.allowExternalSensing
-                ? (input) => new JevSelector({ timeoutMs: config.limits.selectionDeadlineMs }).choose(input)
+                ? (input) => new JevSelector(quotaSelectorOptions(config.limits.selectionDeadlineMs, config.costMode)).choose(input)
                 : undefined;
             decision = await gate.ensure(buildGateInput(config, mode, ctx, event.prompt, jevChoose), selector);
         }
@@ -593,7 +529,7 @@ export default function (pi) {
             await writeDecisionReceipt(config, invalidated, "cancelled", (message) => ctx.ui.notify(message, "warning"));
             const selector = buildGateSelector(config);
             const jevChoose = config.selection === "jev" && config.allowExternalSensing
-                ? (input) => new JevSelector({ timeoutMs: config.limits.selectionDeadlineMs }).choose(input)
+                ? (input) => new JevSelector(quotaSelectorOptions(config.limits.selectionDeadlineMs, config.costMode)).choose(input)
                 : undefined;
             const decision = await gate.ensure(buildGateInput(config, mode, ctx, event.text ?? "", jevChoose), selector);
             mode.setRequestRestriction(decision.restriction);
@@ -609,20 +545,71 @@ export default function (pi) {
         gate.invalidate("session started");
         mode.clearRequestRestriction();
         const config = loadConfig(ctx.cwd);
+        admission.configure(config.limits.concurrency, config.limits.maxQueueDepth);
         mode.setAllowedTools("delegate-execution", config.allowedParentTools.delegateExecution);
         mode.setAllowedTools("coordinator-only", config.allowedParentTools.coordinatorOnly);
         // Report the REAL mode, not an unconditional "normal" claim (F22-adjacent).
         ctx.ui.setStatus("pi-delegateau", `${mode.current()} mode; /delegateau status; gate=${config.delegationDecision}`);
+        // Report how each provider's cost is being metered, and say WHICH provider
+        // credentials were found. This is the "check which providers you have and
+        // whether it's a sub or credits" surface: a wrong inference here silently
+        // mis-ranks every candidate, so the user must be able to see and correct it.
+        try {
+            const seen = [];
+            for (const provider of new Set(config.candidates.map((c) => c.identity.provider))) {
+                const resolution = resolveCostMode(provider, config.costMode ?? {});
+                const modeText = resolution.mode === "quota-gpu-time" ? "quota (GPU time)" : "per-token";
+                const authText = resolution.authType ? `${resolution.authType}` : "no credential found yet";
+                seen.push(`${provider}: ${modeText} [${authText}, ${resolution.decidedBy}]`);
+            }
+            if (seen.length > 0) {
+                ctx.ui.notify(`pi-delegateau cost metering — ${seen.join("; ")}. Correct with costMode in ${CONFIG_FILE_NAME} if wrong.`, "info");
+            }
+        }
+        catch {
+            // Reporting is best-effort; never let it break session start.
+        }
+        // Reachability probe: detached, never blocks the session. Its result is not
+        // needed now — the pool is resolved at dispatch time and a probe that
+        // finished last session is usable — so this costs zero dispatch latency and
+        // exists purely to stop offering models the provider will refuse.
+        const probedTargets = reachabilityTargets(config, ctx);
+        if (probedTargets.length > 0) {
+            try {
+                const existing = readProbeCache();
+                if (!isProbeCacheFresh(existing)) {
+                    const handle = startBackgroundProbe({
+                        cwd: probeWorkingDir(),
+                        targets: probedTargets,
+                        ...(config.piCommand ? { command: config.piCommand } : {}),
+                    });
+                    probeHandle = handle;
+                    void handle.done.then((cache) => {
+                        if (!cache)
+                            return;
+                        // Surface the outcome; a probe is diagnostic, never load-bearing.
+                        for (const result of cache.results) {
+                            if (!result.reachable) {
+                                ctx.ui.notify(`pi-delegateau: ${result.identity.provider}/${result.identity.id} did not answer during the reachability probe (${result.errorCategory ?? "unknown"}); it is excluded from future child selection.`, "warning");
+                            }
+                        }
+                    }).catch(() => undefined);
+                }
+            }
+            catch {
+                // Probing is best-effort: a failure must never affect the session.
+            }
+        }
     });
     pi.on("session_shutdown", () => {
         gate.invalidate("session shutdown");
         for (const controller of activeDispatches)
             controller.abort();
+        // Idempotent teardown: kills any outstanding probe process.
+        probeHandle?.abort();
+        probeHandle = undefined;
         mode.clearRequestRestriction();
         mode.setBusy(false);
     });
-}
-function dispatchSummaryPreview(selection) {
-    return `${selection.source}: ${modelKey(selection.identity)}`;
 }
 export { DelegateTaskParams, CHILD_TOOLS };

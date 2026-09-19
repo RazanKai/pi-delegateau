@@ -61,24 +61,63 @@ describe("child runner", () => {
     expect(result.requestedModel).toEqual({ provider: "alpha", id: "requested" });
   });
 
-  // F11 regression: turn budget rejects the turn that would exceed the limit
-  // before consuming it.
-  it("stops consuming turns once the turn limit is exceeded", async () => {
-    let emitted = 0;
+  // F11 regression: turn budget refuses a turn the child wants to CONTINUE
+  // into, so runaway work is still stopped at the budget edge.
+  // NOTE: this test previously asserted the opposite for a terminal turn — it
+  // used stopReason "stop" (a finished turn) and expected "limit-exceeded",
+  // which encoded the bug this suite now pins as fixed. A terminal turn must
+  // settle normally; only a continuation signal justifies aborting.
+  it("stops runaway work at the turn budget when the child asks to continue", async () => {
+    let aborted = false;
     const runner = new ChildRunner({
-      spawn: async (_request, emit) => {
-        emit({ type: "assistant", model: "alpha/fast", stopReason: "stop", text: "turn-1" });
-        emitted += 1;
-        emit({ type: "assistant", model: "alpha/fast", stopReason: "stop", text: "turn-2" });
-        emitted += 1;
+      spawn: async (request, emit) => {
+        emit({ type: "assistant", model: "alpha/fast", stopReason: "toolUse", text: "turn-1 wants to continue" });
+        aborted = request.signal?.aborted === true;
         return { exitCode: 0, observedExit: true, groupCleaned: true };
       },
     });
     const result = await runner.run({ model: { provider: "alpha", id: "fast" }, task: "x", cwd: "/tmp", tools: ["read"], maxTurns: 1 });
     expect(result.status).toBe("limit-exceeded");
-    // The limit-tripping turn is counted once; the point is that the run is
-    // marked limit-exceeded rather than reported as success with extra turns.
-    expect(emitted).toBeLessThanOrEqual(2);
+    expect(aborted).toBe(true);
+  });
+
+  // The bug this pins: a child that already produced its FINAL answer on the
+  // last allowed turn must not be killed and relabelled "limit-exceeded" —
+  // that discards completed output (observed live: a worker burned 13,564
+  // output tokens and was reported as limit-exceeded).
+  // The live bug this pins: a worker child burned 13,564 output tokens and was
+  // reported "limit-exceeded" with its work discarded. This guards the
+  // observable contract — a child that completes within its budget succeeds and
+  // its output survives. (Passes on the base revision too; the red-on-base
+  // proof for the abort timing is the test above.)
+  it("keeps the output of a child that completed within its turn budget", async () => {
+    let aborted = false;
+    const runner = new ChildRunner({
+      spawn: async (request, emit) => {
+        emit({ type: "assistant", model: "alpha/fast", stopReason: "toolUse", text: "working" });
+        emit({ type: "assistant", model: "alpha/fast", stopReason: "stop", text: "FINAL-ANSWER" });
+        aborted = request.signal?.aborted === true;
+        return { exitCode: 0, observedExit: true, groupCleaned: true };
+      },
+    });
+    const result = await runner.run({ model: { provider: "alpha", id: "fast" }, task: "x", cwd: "/tmp", tools: ["read"], maxTurns: 5 });
+    expect(aborted).toBe(false);
+    expect(result.status).toBe("success");
+    expect(result.output).toContain("FINAL-ANSWER");
+  });
+
+  // A single terminal turn under a budget of one is complete work, not a
+  // budget breach — the limit is an allowance, not a requirement to exceed it.
+  it("treats a single terminal turn as success at a budget of one", async () => {
+    const runner = new ChildRunner({
+      spawn: async (_request, emit) => {
+        emit({ type: "assistant", model: "alpha/fast", stopReason: "stop", text: "ONLY-TURN" });
+        return { exitCode: 0, observedExit: true, groupCleaned: true };
+      },
+    });
+    const result = await runner.run({ model: { provider: "alpha", id: "fast" }, task: "x", cwd: "/tmp", tools: ["read"], maxTurns: 1 });
+    expect(result.status).toBe("success");
+    expect(result.output).toContain("ONLY-TURN");
   });
 
   // F11 regression: output truncation is flagged, not silent.

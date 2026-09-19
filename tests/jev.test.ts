@@ -36,7 +36,14 @@ describe("JevSelector", () => {
     expect(systemOne).toHaveBeenCalledOnce();
     const request = systemOne.mock.calls[0]![0] as any;
     expect(request.model).toBe("jev-latest");
-    expect(request.questions.selected_model.criteria).toEqual({ "alpha/fast-1": "fast", "beta/strong-1": "strong" });
+    // The criterion is the description PLUS the provider-published facts. Prose
+    // alone is what let a model be chosen on an unverified capability claim
+    // while its real price went unread, so the facts are part of the contract.
+    expect(request.questions.selected_model.criteria["alpha/fast-1"]).toContain("fast");
+    expect(request.questions.selected_model.criteria["beta/strong-1"]).toContain("strong");
+    // A candidate whose price the provider did not declare is labelled unknown
+    // rather than silently carrying a guess.
+    expect(request.questions.selected_model.criteria["beta/strong-1"]).toContain("price unknown");
     expect(JSON.stringify(request)).toContain("TASK DATA");
   });
 

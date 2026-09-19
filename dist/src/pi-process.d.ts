@@ -1,8 +1,17 @@
 import type { ChildEvent, ChildRequest } from "./types.js";
+import type { ProbedTool } from "./child-extensions.js";
 import type { ChildSpawner, SpawnResult } from "./runner.js";
 export interface PiProcessOptions {
     command?: string;
     killGraceMs?: number;
+}
+export interface ExtensionToolProbeOptions {
+    command?: string;
+    cwd: string;
+    extensionPaths: string[];
+    requestedTools: string[];
+    signal?: AbortSignal;
+    timeoutMs?: number;
 }
 /** True when the platform supports detached process groups we can signal. */
 declare function supportsProcessGroups(): boolean;
@@ -21,4 +30,5 @@ export declare class PiProcessSpawner implements ChildSpawner {
     spawn(request: ChildRequest, emit: (event: ChildEvent) => void): Promise<SpawnResult>;
     private runProcess;
 }
+export declare function probePiExtensionTools(options: ExtensionToolProbeOptions): Promise<ProbedTool[]>;
 export { groupHasSurvivors, signalGroup, supportsProcessGroups };

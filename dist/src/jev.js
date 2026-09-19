@@ -1,8 +1,13 @@
 import { choice, TypeSafeClient } from "@typesafe-ai/sdk";
+import { describeCostSignal, resolveCostSignal } from "./quota.js";
 import { modelKey } from "./types.js";
 export class JevSelector {
     client;
     timeoutMs;
+    /** Measured quota coefficients for quota-metered providers, if any exist. */
+    quotaStore;
+    /** Per-provider metering overrides from config. */
+    costModeConfig;
     /**
      * Client construction is defensive (F01 class): a missing API key or
      * transport failure becomes a normal choose() error inside the selection
@@ -10,6 +15,8 @@ export class JevSelector {
      */
     constructor(options = {}) {
         this.timeoutMs = options.timeoutMs ?? 2_000;
+        this.quotaStore = options.quotaStore;
+        this.costModeConfig = options.costModeConfig;
         if (options.client) {
             this.client = options.client;
             return;
@@ -26,7 +33,31 @@ export class JevSelector {
             throw new Error("Model chooser sensor is unavailable: no credentials or transport configured");
         const criteria = {};
         for (const candidate of input.state.candidates) {
-            criteria[`${candidate.identity.provider}/${candidate.identity.id}`] = candidate.description;
+            const key = `${candidate.identity.provider}/${candidate.identity.id}`;
+            // The criterion is the description PLUS the facts the provider published,
+            // because prose alone is what let a model be chosen for "large reasoning"
+            // on a claim nobody verified, while its real price went unread. A price
+            // is labelled with its provenance so a config-authored guess is never
+            // presented as the catalog's own number.
+            const facts = [candidate.description];
+            // Cost is resolved by the provider's METERING model, not by price alone.
+            // On a quota-metered subscription the published price is not the axis that
+            // runs out, and using it ranks the plan's most expensive model as the
+            // cheapest (measured: glm-5.3-flash has half the price of
+            // deepseek-v4.1-flash and ~3.5x the quota cost).
+            facts.push(describeCostSignal(resolveCostSignal(candidate.identity, candidate, {
+                ...(this.quotaStore ? { quotaStore: this.quotaStore } : {}),
+                ...(this.costModeConfig ? { costModeConfig: this.costModeConfig } : {}),
+            })));
+            if (candidate.contextWindow !== undefined)
+                facts.push(`context ${Math.round(candidate.contextWindow / 1000)}K`);
+            if (candidate.maxOutputTokens !== undefined)
+                facts.push(`max output ${Math.round(candidate.maxOutputTokens / 1000)}K`);
+            if (candidate.reasoning !== undefined)
+                facts.push(candidate.reasoning ? "reasoning-capable" : "no reasoning mode");
+            if (candidate.inputModalities && candidate.inputModalities.length > 0)
+                facts.push(`accepts ${candidate.inputModalities.join("+")}`);
+            criteria[key] = facts.join(" | ");
         }
         // Known candidate metadata is forwarded to the chooser (F10): provenance,
         // cost, latency and context window are what let the chooser interpret the

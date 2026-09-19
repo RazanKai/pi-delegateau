@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DelegationGate, type DelegationGateInput } from "../src/gate.js";
+import { DelegationGate } from "../src/gate.js";
 import { buildDecisionReceipt, buildReceipt, classifyError, dispatchSummary, sanitizeError } from "../src/receipts.js";
 
 describe("receipts", () => {
@@ -23,6 +23,20 @@ describe("receipts", () => {
     expect(encoded).not.toContain("SECRET EXPECTED OUTPUT");
     expect(encoded).not.toContain("SECRET CONTEXT");
     expect(receipt).toMatchObject({ dispatchId: "d-1", source: "jev", outcome: "success" });
+  });
+
+  it("classifies dispatch fallback causes inside the receipt builder", () => {
+    const receipt = buildReceipt({
+      dispatchId: "d-fallback",
+      agent: "worker",
+      preference: "balanced",
+      eligibleIds: ["alpha/fast"],
+      profileVersion: "v1",
+      outcome: "success",
+      fallbackCause: "Request timed out after 200ms. REMOTE-DISPATCH-BODY",
+    });
+    expect(receipt.fallbackCause).toBe("timeout");
+    expect(JSON.stringify(receipt)).not.toContain("REMOTE-DISPATCH-BODY");
   });
 
   it("records request decisions without the prompt body and keeps execution outcome separate", async () => {
@@ -67,6 +81,36 @@ describe("receipts", () => {
     expect(encoded).not.toContain("PRIVATE-PROMPT-CONTENT");
     expect(encoded).not.toContain("billing rotation");
     expect(receipt.reason).toBe("invalid-response");
+  });
+
+  // F08 sibling regression: the invalidation persistence path must be
+  // categorized like the gate-failure reason path, never persisted raw.
+  it("classifies invalidation reasons instead of persisting raw service text", async () => {
+    const gate = new DelegationGate();
+    await gate.ensure({
+      prompt: "Do this: private task detail refactor the billing rotation",
+      policy: "jev-suggest",
+      baseMode: "normal",
+      baseTools: ["read", "write", "delegate_task"],
+      preference: "balanced",
+      parent: { capabilities: ["code"] },
+      candidates: [{ identity: { provider: "child", id: "m" }, description: "d", capabilities: ["code"], provenance: "user" }],
+      childAvailable: true,
+      childAgentNames: ["worker"],
+      allowExternalSensing: true,
+      deadlineMs: 100,
+      maxGatePromptChars: 20_000,
+    }, { choose: async () => ({ recommendation: "local" }) });
+    const decision = gate.invalidate(
+      "422 body.questions.recommendation: REMOTE-PROMPT-ECHO prompt must include private task detail before refactoring the billing rotation script",
+    );
+    const receipt = buildDecisionReceipt(decision!, "decision");
+    const categories = new Set(["credential-missing", "timeout", "invalid-response", "cancelled", "sensing-prohibited", "sensor-error"]);
+    expect(categories.has(receipt.reason!)).toBe(true);
+    expect(categories.has(receipt.invalidationReason!)).toBe(true);
+    const encoded = JSON.stringify(receipt);
+    expect(encoded).not.toContain("REMOTE-PROMPT-ECHO");
+    expect(encoded).not.toContain("private task detail");
   });
 
   it("classifies credential, timeout and cancellation errors", () => {

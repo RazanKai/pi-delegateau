@@ -2,10 +2,16 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { CHILD_TOOLS } from "./config.js";
 declare const DelegateTaskParams: Type.TObject<{
-    agent: Type.TString;
-    task: Type.TString;
+    agent: Type.TOptional<Type.TString>;
+    task: Type.TOptional<Type.TString>;
     expectedOutput: Type.TOptional<Type.TString>;
     context: Type.TOptional<Type.TString>;
+    assignments: Type.TOptional<Type.TArray<Type.TObject<{
+        agent: Type.TString;
+        task: Type.TString;
+        expectedOutput: Type.TOptional<Type.TString>;
+        context: Type.TOptional<Type.TString>;
+    }>>>;
 }>;
 type DelegateTaskParams = Static<typeof DelegateTaskParams>;
 export default function (pi: ExtensionAPI): void;

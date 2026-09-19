@@ -1,4 +1,4 @@
-import { modelKey, sameModel, } from "./types.js";
+import { modelKey, sameModel, COMPLEXITY_EFFORT, } from "./types.js";
 const CHOICE_QUESTION = "Which eligible model best fits this assignment under the supplied routing preference and candidate profiles?";
 function abortError() {
     return Object.assign(new Error("The delegation was cancelled"), { name: "AbortError" });
@@ -76,6 +76,10 @@ async function chooseWithDeadline(request, runtime) {
                 ...(request.context ? { context: request.context } : {}),
                 agent: { name: request.agent.name, instructions: request.agent.instructions, tools: [...request.agent.tools] },
                 preference: request.preference,
+                // The difficulty axis, plus the effort it conventionally implies, so the
+                // chooser can match capability to the work instead of guessing from a
+                // single cost/quality word.
+                ...(request.complexity ? { complexity: request.complexity, suggestedEffort: COMPLEXITY_EFFORT[request.complexity] } : {}),
                 candidates: request.candidates.map((candidate) => ({
                     ...candidate,
                     identity: { ...candidate.identity },

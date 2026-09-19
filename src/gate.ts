@@ -2,11 +2,15 @@ import { randomUUID } from "node:crypto";
 import { choice, TypeSafeClient } from "@typesafe-ai/sdk";
 import type {
   CandidateProfile,
+  ComplexityLevel,
   DelegationMode,
   DelegationPolicy,
   ModelIdentity,
+  RepositoryProfile,
   RoutingPreference,
 } from "./types.js";
+import { COMPLEXITY_EFFORT, COMPLEXITY_LEVELS } from "./types.js";
+import { isComplexityLevel } from "./live-data.js";
 
 export type GateRecommendation = "local" | "delegate";
 export type GateRestriction = "none" | "delegate" | "blocked";
@@ -27,6 +31,10 @@ export interface DelegationGateInput {
   allowExternalSensing: boolean;
   deadlineMs: number;
   maxGatePromptChars: number;
+  /** Bounded, non-source repository profile; rate the same request per repo. */
+  repository?: RepositoryProfile;
+  /** Bounded statement of what a wrong answer costs for this assignment. */
+  failureCost?: string;
 }
 
 export interface DelegationChoiceInput {
@@ -39,13 +47,23 @@ export interface DelegationChoiceInput {
     candidates: CandidateProfile[];
     childAvailable: boolean;
     childAgentNames: string[];
+    repository?: RepositoryProfile;
+    failureCost?: string;
   };
   question: string;
+  /** Question text for the complexity judgement, asked in the SAME call. */
+  complexityQuestion: string;
   signal?: AbortSignal;
 }
 
 export interface DelegationChoiceAnswer {
   recommendation: GateRecommendation;
+  /**
+   * Difficulty of the work. Asked alongside the local-vs-delegate judgement so
+   * one bounded sensing operation yields both — the chooser needs a difficulty
+   * axis, and a three-value cost/quality preference cannot supply one.
+   */
+  complexity?: ComplexityLevel;
   confidence?: number;
   usage?: { inputTokens?: number; outputTokens?: number };
 }
@@ -63,6 +81,8 @@ export interface DelegationDecision {
   status: GateStatus;
   restriction: GateRestriction;
   recommendation?: GateRecommendation;
+  /** Difficulty judged in the same sensing call as the recommendation. */
+  complexity?: ComplexityLevel;
   childAvailable: boolean;
   eligibleChildIds: string[];
   childAgentNames: string[];
@@ -77,6 +97,23 @@ export interface DelegationDecision {
 
 const DELEGATION_QUESTION =
   "Given this parent, the eligible child capabilities, the context requirements, and the user's policy, which permitted execution path is preferable after accounting for handoff cost?";
+
+/**
+ * Asked in the SAME TypeSafe call as the delegation question, so difficulty
+ * costs no extra round trip and cannot drift from the judged request.
+ */
+const COMPLEXITY_QUESTION =
+  "How difficult is this work in this repository? Judge the work itself, not the size of any single file.";
+
+/** Criteria spelling out the ordinal scale so levels are not left to guesswork. */
+const COMPLEXITY_CRITERIA: Readonly<Record<string, string>> = {
+  trivial: "rename, typo, or version bump; no reasoning about behaviour",
+  simple: "a focused change in one file with an obvious correct answer",
+  moderate: "a contained bug or a multi-file feature within one subsystem",
+  advanced: "a subsystem change or cross-cutting refactor",
+  complex: "concurrency, data migration, or cross-service debugging",
+  frontier: "greenfield architecture or a core rewrite",
+};
 
 function modelKey(identity: ModelIdentity): string {
   return `${identity.provider}/${identity.id}`;
@@ -227,8 +264,11 @@ export class DelegationGate {
             })),
             childAvailable: copied.childAvailable,
             childAgentNames: [...copied.childAgentNames],
+            ...(copied.repository ? { repository: copied.repository } : {}),
+            ...(copied.failureCost ? { failureCost: copied.failureCost } : {}),
           },
           question: DELEGATION_QUESTION,
+          complexityQuestion: COMPLEXITY_QUESTION,
           signal: controller.signal,
         }),
         new Promise<never>((_, reject) => {
@@ -244,6 +284,7 @@ export class DelegationGate {
         status: "applied",
         source: "jev",
         recommendation: answer.recommendation,
+        ...(answer.complexity ? { complexity: answer.complexity } : {}),
         restriction: copied.policy === "jev-enforce" && answer.recommendation === "delegate" ? "delegate" : "none",
         ...(answer.confidence !== undefined ? { confidence: answer.confidence } : {}),
         ...(answer.usage ? { usage: answer.usage } : {}),
@@ -367,19 +408,31 @@ export class JevDelegationSelector implements DelegationChoiceRuntime {
       local: "Handle the request with the current parent; delegation is not worth its handoff cost.",
       delegate: "Send the request to one eligible child; the child can provide a useful isolated execution path.",
     };
+    // One call, two questions: the local-vs-delegate judgement and the
+    // difficulty rating. Asking both together keeps one bounded sensing
+    // operation per request and guarantees the difficulty refers to exactly the
+    // request the recommendation was made about.
     const response = await this.client.systemOne(
       {
         state: input.state,
         model: "jev-latest",
-        questions: { recommendation: choice(input.question, criteria) },
+        questions: {
+          recommendation: choice(input.question, criteria),
+          complexity: choice(input.complexityQuestion, COMPLEXITY_CRITERIA),
+        },
       },
       { ...(input.signal ? { signal: input.signal } : {}), timeout: this.timeoutMs, retry: { maxRetries: 0 } },
     );
     const answer = response?.answers?.recommendation;
     if (!answer || (answer.choice !== "local" && answer.choice !== "delegate")) throw new Error("Jev returned no valid delegation recommendation");
+    const complexity = response?.answers?.complexity?.choice;
     const confidence = typeof answer.confidence === "number" && Number.isFinite(answer.confidence) ? answer.confidence : undefined;
     return {
       recommendation: answer.choice,
+      // An unrecognised level is dropped rather than coerced: a bad rating must
+      // not silently become a routing input. The chooser then falls back to its
+      // own judgement without a difficulty hint.
+      ...(isComplexityLevel(complexity) ? { complexity } : {}),
       ...(confidence !== undefined ? { confidence } : {}),
       ...(response.usage ? { usage: { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens } } : {}),
     };

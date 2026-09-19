@@ -54,7 +54,7 @@ describe("Pi child process spawner", () => {
       directory,
       `const args = process.argv.slice(2);
 const required = ["--mode", "json", "--no-session", "--no-extensions", "--model", "fake/fast", "--tools", "read", "--append-system-prompt"];
-if (!required.every((value) => args.includes(value))) process.exit(2);
+if (!required.every((value) => args.includes(value)) || args.includes("-e")) process.exit(2);
 process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fast", responseModel: "fake/fast-served", content: [{ type: "text", text: "child result" }], stopReason: "stop" } }) + "\\n");`,
     );
 
@@ -63,6 +63,27 @@ process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "ass
       const result = await new PiProcessSpawner({ command }).spawn(request, (event) => events.push(event));
       expect(result).toMatchObject({ exitCode: 0, observedExit: true, processStarted: true, groupCleaned: true });
       expect(events).toContainEqual({ type: "assistant", text: "child result", model: "fake/fast", responseModel: "fake/fast-served", stopReason: "stop" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps discovery disabled while adding each explicit extension entry", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-delegateau-extensions-"));
+    const first = join(directory, "first.ts");
+    const second = join(directory, "second.js");
+    await writeFile(first, "", "utf8");
+    await writeFile(second, "", "utf8");
+    const command = await makeFakePi(
+      directory,
+      `const args = process.argv.slice(2);
+const entries = args.flatMap((value, index) => value === "-e" ? [args[index + 1]] : []);
+if (!args.includes("--no-extensions") || JSON.stringify(entries) !== JSON.stringify([${JSON.stringify(first)}, ${JSON.stringify(second)}])) process.exit(6);
+process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fast", content: [{ type: "text", text: "ok" }], stopReason: "stop" } }) + "\\n");`,
+    );
+    try {
+      const result = await new PiProcessSpawner({ command }).spawn({ ...request, extensionPaths: [first, second] }, () => undefined);
+      expect(result.exitCode).toBe(0);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

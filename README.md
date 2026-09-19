@@ -8,10 +8,12 @@ and only the task context. The parent keeps control of the overall work.
 
 ## What it does
 
-- Starts one child Pi process for each accepted delegation.
+- Starts one child Pi process per assignment, with a bounded parallel slot pool
+  and FIFO queue; one tool call may contain one assignment or a batch.
 - Selects a configured model by pin, fixed default, or optional TypeSafe Jev
   choice.
-- Allows only trusted child agents and approved child tools.
+- Allows only trusted child agents and approved child tools, including tools from
+  explicitly allowlisted child extensions.
 - Reports progress, output, errors, cancellation, timeouts, and limits.
 - Writes small JSONL receipts without task bodies or raw prompts.
 - Optionally restricts the parent to coordinating and delegating instead of
@@ -24,8 +26,8 @@ Enforcement fails closed if the decision service is unavailable; `manual` keeps
 normal parent behavior. The decision is request-scoped and does not mutate later
 conversation history.
 
-It does not provide a planner, queue, parallel workers, automatic review, repair
-loop, worktree management, or correctness verdicts.
+It does not provide a planner, nested delegation, automatic review, repair loop,
+worktree management, or correctness verdicts.
 
 ## Requirements
 
@@ -72,7 +74,8 @@ configuration looks like this:
   "agents": {
     "worker": {
       "instructions": "Implement only the assignment and report what changed.",
-      "tools": ["read", "bash", "edit", "write"]
+      "tools": ["read", "bash", "edit", "write", "lens_diagnostics"],
+      "childExtensions": ["pi-lens"]
     }
   }
 }
@@ -83,6 +86,11 @@ Optional fields:
 - `childThinking`: fixed thinking level for the child (`off`, `minimal`,
   `low`, `medium`, `high`, `xhigh`, `max`); passed to the child via
   `--thinking`.
+- `agents.<name>.childExtensions`: opt-in package names or absolute/`~` paths.
+  Names resolve from Pi's global/project package settings and each package's
+  `pi.extensions` manifest. Missing or empty means built-ins only.
+- `limits.concurrency` (default 3) and `limits.maxQueueDepth` (default 20):
+  bound running and waiting assignments.
 - `limits.maxExpectedOutputChars` / `limits.maxGatePromptChars`: bounds for
   the optional expected-output field and the prompt sent to the Jev
   delegation gate.
@@ -105,9 +113,10 @@ Trust and safety behavior:
 The child command defaults to `pi`; set `"piCommand": "/absolute/path/to/pi"`
 when testing from a checkout without a globally installed Pi executable.
 
-The parent can then use the `delegate_task` tool with an agent name and a
-self-contained task. The extension starts another Pi process with
-`--no-session`, `--no-extensions`, the chosen model, and the configured child
+The parent can use `delegate_task` with the existing `agent`/`task` fields or an
+`assignments` array. Each assignment gets a distinct dispatch ID and receipt.
+The extension starts another Pi process with `--no-session`, `--no-extensions`,
+zero or more explicit `-e` entries, the chosen model, and the configured child
 tools.
 
 Useful commands inside Pi:
@@ -128,10 +137,9 @@ Useful commands inside Pi:
 
 ## Status
 
-The implementation, local tests, and the review-fix campaign are complete
-(11 test files / 69 tests, hermetic without credentials). The following still
-require a real configured environment: a live provider-backed child run, a
-credentialed Jev-to-child run, and a fixed-versus-Jev pilot.
+The implementation and local suite are exercised hermetically without TypeSafe
+credentials. Live child-extension and bounded-parallel dispatch evidence is
+recorded in `docs/WORKLOG.md`; the fixed-versus-Jev pilot remains separate.
 
 Known limitations:
 

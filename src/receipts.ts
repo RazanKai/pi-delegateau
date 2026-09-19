@@ -28,7 +28,17 @@ export interface ReceiptInput {
   outputTruncated?: boolean;
 }
 
-export type Receipt = Omit<ReceiptInput, "task" | "expectedOutput" | "context">;
+export type ReceiptErrorCategory =
+  | "credential-missing"
+  | "timeout"
+  | "invalid-response"
+  | "cancelled"
+  | "sensing-prohibited"
+  | "sensor-error";
+
+export type Receipt = Omit<ReceiptInput, "task" | "expectedOutput" | "context" | "fallbackCause"> & {
+  fallbackCause?: ReceiptErrorCategory;
+};
 
 export interface DecisionReceiptInput {
   decisionId: string;
@@ -52,12 +62,15 @@ export interface DecisionReceiptInput {
   usage?: unknown;
 }
 
-export type DecisionReceipt = DecisionReceiptInput;
+export type DecisionReceipt = Omit<DecisionReceiptInput, "reason" | "invalidationReason"> & {
+  reason?: ReceiptErrorCategory;
+  invalidationReason?: ReceiptErrorCategory;
+};
 
 // Error classification persisted instead of raw remote text. Gate/chooser
 // failures are categorized; the raw service message never reaches receipts
 // because it can echo private prompt content (F08).
-const ERROR_CATEGORIES: ReadonlyArray<[RegExp, string]> = [
+const ERROR_CATEGORIES: ReadonlyArray<[RegExp, ReceiptErrorCategory]> = [
   [/no api key|api key|credentials|credential|auth/i, "credential-missing"],
   [/deadline|timeout|timed?\s*out/i, "timeout"],
   [/invalid|malformed|no valid|unexpected|must be/i, "invalid-response"],
@@ -65,7 +78,10 @@ const ERROR_CATEGORIES: ReadonlyArray<[RegExp, string]> = [
   [/prohibited/i, "sensing-prohibited"],
 ];
 
-export function classifyError(message: string | undefined): string | undefined {
+export function classifyError(message: string): ReceiptErrorCategory;
+export function classifyError(message: undefined): undefined;
+export function classifyError(message: string | undefined): ReceiptErrorCategory | undefined;
+export function classifyError(message: string | undefined): ReceiptErrorCategory | undefined {
   if (!message) return undefined;
   for (const [pattern, category] of ERROR_CATEGORIES) {
     if (pattern.test(message)) return category;
@@ -74,7 +90,7 @@ export function classifyError(message: string | undefined): string | undefined {
 }
 
 export function buildDecisionReceipt(decision: DelegationDecision, outcome: string): DecisionReceipt {
-  return JSON.parse(JSON.stringify({
+  return {
     decisionId: decision.decisionId,
     generation: decision.generation,
     policy: decision.policy,
@@ -88,13 +104,13 @@ export function buildDecisionReceipt(decision: DelegationDecision, outcome: stri
     childAgentNames: decision.childAgentNames,
     execution: decision.execution,
     outcome,
-    ...(decision.reason ? { reason: classifyError(decision.reason) ?? sanitizeError(decision.reason) } : {}),
-    ...(decision.invalidationReason ? { invalidationReason: sanitizeError(decision.invalidationReason) } : {}),
+    ...(decision.reason ? { reason: classifyError(decision.reason) } : {}),
+    ...(decision.invalidationReason ? { invalidationReason: classifyError(decision.invalidationReason) } : {}),
     ...(decision.override ? { override: decision.override } : {}),
     ...(decision.confidence !== undefined ? { confidence: decision.confidence } : {}),
     ...(decision.latencyMs !== undefined ? { latencyMs: decision.latencyMs } : {}),
     ...(decision.usage ? { usage: decision.usage } : {}),
-  })) as DecisionReceipt;
+  };
 }
 
 /**
@@ -109,8 +125,11 @@ export function sanitizeError(message: string, secrets: string[] = []): string {
 }
 
 export function buildReceipt(input: ReceiptInput): Receipt {
-  const { task: _task, expectedOutput: _expectedOutput, context: _context, ...safe } = input;
-  return JSON.parse(JSON.stringify(safe)) as Receipt;
+  const { task: _task, expectedOutput: _expectedOutput, context: _context, fallbackCause, ...safe } = input;
+  return {
+    ...safe,
+    ...(fallbackCause ? { fallbackCause: classifyError(fallbackCause) } : {}),
+  };
 }
 
 /** Build a short human-readable dispatch summary including served-model evidence. */

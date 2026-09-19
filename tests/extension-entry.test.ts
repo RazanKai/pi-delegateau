@@ -113,4 +113,82 @@ process.stdout.write(JSON.stringify({type:"message_end",message:{role:"assistant
       await rm(cwd, { recursive: true, force: true });
     }
   });
+
+  it("runs a batch in parallel, queues overflow with position updates, and writes one receipt per assignment", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pi-delegateau-batch-"));
+    const fakePi = join(cwd, "fake-pi");
+    const receipts = join(cwd, "receipts.jsonl");
+    const timeline = join(cwd, "timeline.jsonl");
+    await writeFile(fakePi, `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = ${JSON.stringify(timeline)};
+const task = process.argv.at(-1);
+const now = () => new Date().toISOString();
+fs.appendFileSync(path, JSON.stringify({ event: "start", task, at: now(), pid: process.pid }) + "\\n");
+function starts() { return fs.readFileSync(path, "utf8").trim().split("\\n").map(JSON.parse).filter(e => e.event === "start").length; }
+function finish() {
+  fs.appendFileSync(path, JSON.stringify({ event: "end", task, at: now(), pid: process.pid }) + "\\n");
+  if (task === "FAIL") return process.exit(2);
+  process.stdout.write(JSON.stringify({type:"message_end",message:{role:"assistant",provider:"fake",model:"child-model",content:[{type:"text",text:"done " + task}],stopReason:"stop"}})+"\\n");
+}
+if (task === "A" || task === "B") {
+  const wait = () => starts() >= 2 ? finish() : setTimeout(wait, 10);
+  wait();
+} else finish();
+`, "utf8");
+    await chmod(fakePi, 0o755);
+    await mkdir(join(cwd, ".pi"), { recursive: true });
+    await writeFile(join(cwd, ".pi", "delegateau.json"), JSON.stringify({
+      selection: "fixed",
+      defaultModel: { provider: "fake", id: "child-model" },
+      candidates: [{ provider: "fake", id: "child-model" }],
+      agents: { worker: { instructions: "Work.", tools: ["read"] } },
+      limits: { concurrency: 2, maxQueueDepth: 2 },
+      piCommand: fakePi,
+      receiptPath: receipts,
+    }), "utf8");
+
+    try {
+      const tools: any[] = [];
+      const handlers = new Map<string, any>();
+      let activeTools = ["read", "delegate_task"];
+      const pi: any = {
+        registerTool: (tool: any) => tools.push(tool),
+        registerCommand: () => undefined,
+        on: (name: string, handler: any) => handlers.set(name, handler),
+        getActiveTools: () => activeTools,
+        setActiveTools: (next: string[]) => { activeTools = next; },
+        getAllTools: () => activeTools.map((name) => ({ name })),
+      };
+      extension(pi);
+      const updates: any[] = [];
+      const result = await tools[0].execute("batch", { assignments: [
+        { agent: "worker", task: "A" },
+        { agent: "worker", task: "B" },
+        { agent: "worker", task: "C" },
+      ] }, undefined, (update: any) => updates.push(update), makeContext(cwd));
+
+      expect(result.details).toMatchObject({ status: "success", dispatches: [{ status: "success" }, { status: "success" }, { status: "success" }] });
+      expect(new Set(result.details.dispatches.map((item: any) => item.dispatchId)).size).toBe(3);
+      expect(updates.some((update) => update.details.status === "queued" && update.details.queuePosition === 1)).toBe(true);
+      const events = (await readFile(timeline, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+      const firstEnd = events.findIndex((event) => event.event === "end");
+      expect(events.slice(0, firstEnd).filter((event) => event.event === "start").map((event) => event.task).sort()).toEqual(["A", "B"]);
+      expect(events.findIndex((event) => event.event === "start" && event.task === "C")).toBeGreaterThan(firstEnd);
+
+      let mixedError: any;
+      try {
+        await tools[0].execute("mixed", { assignments: [
+          { agent: "worker", task: "D" },
+          { agent: "worker", task: "FAIL" },
+        ] }, undefined, undefined, makeContext(cwd));
+      } catch (error) {
+        mixedError = error;
+      }
+      expect(mixedError?.payload?.details).toMatchObject({ status: "partial-failure", dispatches: [{ status: "success" }, { status: "failed" }] });
+      expect((await readFile(receipts, "utf8")).trim().split("\n")).toHaveLength(5);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 20_000);
 });

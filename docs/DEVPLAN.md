@@ -12,9 +12,11 @@ This plan replaces the previous development plan in full. The acceptance table
 below is updated as implementation evidence is produced. `WORKLOG.md` is the
 chronological record of actual development.
 
-The scope is intentionally sequential: one admitted dispatch per extension
-instance, no batches, chains, work queue, worktree management, automatic gates,
-validator, planner, or repair loop.
+The dispatch scope is intentionally bounded: a configured instance-local slot
+pool and finite FIFO queue support compatible single and batch calls. Chains,
+nested delegation, worktree management, automatic gates, validator, planner, and
+repair loops remain excluded. Child extensions are per-agent, explicit, and
+fail-closed.
 
 ## Development discipline
 
@@ -82,7 +84,8 @@ Work:
 1. Validate configuration and trusted agent definitions. Implement candidate
    eligibility, pins, defaults, fixed selection and single-candidate resolution.
 2. Register a generic agent/task delegation tool without model or complexity input.
-3. Acquire the dispatch lock before selection; reject overlapping attempts as busy.
+3. Acquire a dispatch slot before selection; M8 supplies bounded parallel slots and
+   FIFO waiting instead of rejecting ordinary overlap as busy.
 4. Launch using the chosen Pi execution path with explicit model, thinking level,
    tools, instructions and cwd. Disable recursive tools/extension loading.
 5. Normalize progress, usage and child outcomes. Distinguish provider error,
@@ -99,8 +102,9 @@ Exit evidence:
 - Parent model is unchanged; child context excludes an unrelated parent sentinel.
 - Candidate and pin cases are exercised, including invalid default/pin and no
   eligible model. No sensor call occurs in fixed mode.
-- Concurrent tool calls prove one admission; a later call succeeds after confirmed
-  cleanup. A cleanup failure remains blocked rather than falsely returning idle.
+- Concurrent tool calls prove the configured admission bound; excess work waits in
+  FIFO order and later starts after confirmed cleanup. A cleanup failure blocks its
+  own slot rather than falsely returning idle.
 - Provider error with zero process exit is not marked successful. A normal exit
   is described as execution completion, not automatically verified correctness.
 - Cancellation/timeout probes exercise children with descendants, pre-cancelled
@@ -320,6 +324,94 @@ Exit evidence:
 Full release review covers T01–T17; original evidence remains valid only where the
 new policy path has not changed the behavior it established.
 
+## M7 — Selective child extensions
+
+**Goal:** let each trusted agent opt into named extension tools without restoring
+child extension discovery or recursive delegation.
+
+Work:
+
+1. Add `childExtensions` to trusted-agent configuration. Missing and empty arrays
+   must produce the exact built-in-only launch shape used before this milestone.
+2. Resolve names from the effective global and trusted-project Pi `packages`
+   settings. Implement Pi npm/git/local package locations and project-over-global
+   identity precedence; read `pi.extensions` from manifests rather than guessing
+   an entry filename. Resolve `~` and absolute selectors explicitly.
+3. Reject missing, ambiguous, undeclared, malformed or non-file entries before
+   spawn. Reject pi-delegateau by package/root/entry identity even through aliases
+   or paths. Preserve `--no-extensions` and add explicit absolute `-e` entries only.
+4. Discover extension tool ownership through an isolated, bounded Pi registration
+   probe and validate each configured child tool against built-ins plus tools from
+   the resolved entries. Always reject `delegate_task`; do not widen approval of
+   command or mutation tools.
+5. Add hermetic manifest/layout fixtures for npm, git and local packages, settings
+   precedence, TypeScript and JavaScript entries, missing paths, missing manifests,
+   absent `pi.extensions`, recursion aliases, unknown tools and no-allowlist argv.
+6. Run live children that report their active tools with pi-lens admitted and with
+   no allowlist; record an unresolved-name launch failure through the real tool.
+
+Exit evidence:
+
+- A real Pi child launched with `--no-extensions -e <resolved-entry> --tools ...`
+  reports the selected extension tool, and its entry matches the installed
+  package's manifest rather than a conventional filename.
+- The same agent with absent/empty `childExtensions` receives no `-e` arguments
+  and reports built-ins only.
+- Unknown name, missing path, package without `pi.extensions`, unknown extension
+  tool, and every pi-delegateau selector form fail before child execution with a
+  clear per-dispatch launch error.
+- Existing `bash`/`edit`/`write` behavior is unchanged and no child can call
+  `delegate_task`.
+
+**Acceptance target:** T18; rerun T02, T08, T09 and T11 because the launch line and
+pre-launch validation change.
+
+## M8 — Parallel queue and batch dispatch
+
+**Goal:** overlap independent children up to a finite limit and queue the rest
+without weakening cleanup truthfulness.
+
+Work:
+
+1. Replace `DispatchAdmission` with an instance-local slot pool configured by
+   `concurrency` (default 3) and `maxQueueDepth`. Give every queue entry explicit
+   queued/running/cancelled/settled state and one idempotent settlement owner.
+2. Drain in FIFO order, report one-based queue positions on enqueue and after
+   earlier removals, and use explicit gates in tests. Reject queue overflow before
+   model sensing. Remove and wake queued cancellations without assigning a slot;
+   recheck cancellation at dequeue/start boundaries.
+3. Carry the acquired slot through selection, launch and process cleanup. A running
+   abort only signals the child. The single settle operation releases a verified
+   slot or converts its same slot to blocked/degraded; healthy slots continue.
+4. Extend status with capacity, occupied/running, queued and blocked counts plus
+   sanitized blocked reasons. Shutdown drains queued calls and aborts running calls
+   without double release or late start.
+5. Add a mutually exclusive `assignments` batch schema while preserving the legacy
+   single schema. Validate whole-call capacity, dispatch each element independently,
+   preserve input-order results, and write a receipt per dispatch even when siblings
+   fail or cancellation interrupts the batch.
+6. Add deterministic pool, FIFO, queue-position, overflow, queued-abort,
+   dequeue/abort race, startup-failure, blocked-slot and batch tests. Then run real
+   provider children with a low limit and capture timestamps proving overlap and a
+   queued third assignment with position updates.
+
+Exit evidence:
+
+- At `concurrency=2`, two synchronization-controlled children run together and a
+  third starts only after the first verified settlement; queue updates report its
+  changing one-based position and no call receives the former busy result.
+- Cancelling queued work never invokes selection/spawn, never leaks capacity and
+  never starts after a later release. Cancelling running work settles exactly once.
+- One unverified process group leaves one blocked slot visible while remaining
+  capacity continues; a fully blocked pool queues or rejects only according to the
+  configured depth and never falsely reports idle.
+- Legacy single calls and mixed-outcome batches produce separate IDs/receipts;
+  batch output preserves input order and truthful per-element statuses.
+- Live provider timestamps prove actual wall-time overlap and FIFO queueing through
+  the registered extension path, not a mocked pool.
+
+**Acceptance targets:** T19, T20; rerun T03, T09, T10 and T17 under concurrency.
+
 ## Acceptance coverage — authoritative status
 
 Statuses: TODO = not implemented/proven; PARTIAL = named subset verified; DONE =
@@ -330,21 +422,24 @@ or artifact references when updating. Milestone ownership is not evidence.
 | --- | --- | --- | --- | --- |
 | T01 | R01 | M0, M4 | PARTIAL | `package.json`, `src/index.ts`, `NOTICE.md`, and `THIRD_PARTY_LICENSES/pi-foreman-MIT.txt` provide a standalone package and attribution; `PI_OFFLINE=1 ./node_modules/.bin/pi -e ./src/index.ts --list-models` exits 0 without pi-foreman, and a packed tarball installs into a clean `/tmp` consumer with Pi peer metadata. Production Pi installation remains unperformed. Duplicate-tool rejection is documented as a Pi 0.85.1 limitation (no load-time seam); runtime shadow detection added. |
 | T02 | R02, R07 | M1, M3 | PARTIAL | `src/index.ts` registers `delegate_task`; `src/runner.ts` normalizes provider errors, requested/served/applied model evidence, and statuses; failures surface via the error channel (verified through the real agent loop); `tests/pi-process.test.ts` exercises a real spawned JSON child. A live configured provider dispatch remains. |
-| T03 | R02, R08 | M1, M2 | PARTIAL | `tests/admission.test.ts` proves single admission and blocked cleanup; `src/index.ts` holds the lease through selection/run/cleanup and now also blocks when process-group cleanup is unverified. Concurrent Pi invocation and cleanup-failure E2E remain. |
+| T03 | R02, R08, R13 | M1, M2, M8 | DONE | `tests/admission.test.ts` proves bounded acquisition, FIFO promotion, idempotent settlement and per-slot blocking; `src/dispatch.ts` holds the lease through selection/run/cleanup and degrades it on unverified process cleanup. `tests/extension-entry.test.ts` exercises the registered batch path with real subprocess overlap and later admission. |
 | T04 | R03, R05 | M1, M2 | PARTIAL | `tests/selection.test.ts` covers pin/fixed/single/empty/fallback/cancel precedence; `src/index.ts` revalidates Pi registry/auth eligibility and shares `resolveLaunchModel` with the gate. Full live registry matrix remains. |
 | T05 | R04, R07 | M2 | PARTIAL | `src/jev.ts` and `src/gate.ts` use the verified TypeSafe SDK `0.6.0` Choice shape. A credentialed live `JevDelegationSelector` call returned a valid recommendation on 2026-09-19; no credentialed Jev-to-provider-backed-child run was possible because local Pi reported no configured models. |
 | T06 | R03, R05 | M2 | PARTIAL | Selector tests cover sensor failure, invalid choice fallback, and cancellation; entry point revalidates after selection. Gate tests additionally cover invalid delegation recommendations, bounded failure, cancellation, and late answers. Controlled HTTP and late-response entry-path probes remain. |
 | T07 | R06 | M3 | PARTIAL | `src/mode.ts`, `src/index.ts`, and `tests/extension.test.ts` cover explicit active-tool selection and call-time blocking, including unknown tools. `tests/gate.test.ts` proves request restrictions intersect rather than widen the base surface. `tests/config.test.ts` proves configured allowlists cannot re-admit mutation tools. Real Pi dynamic-tool bypass probes remain. |
 | T08 | R02, R07 | M1, M3 | PARTIAL | `src/pi-process.ts` uses `--no-session`, `--no-extensions`, explicit model/tools/thinking, and assignment-only prompt data; `tests/pi-process.test.ts` verifies real JSON launch flags, model evidence, and trusted-prompt/task separation. Untrusted-project delegation is refused before config reads (`ctx.isProjectTrusted` gate, probe-verified). A live provider-backed sentinel-isolation child run remains. |
 | T09 | R05, R08 | M1, M2 | PARTIAL | `src/runner.ts` handles pre-cancel, wall-time, turn limit, signal propagation, usage, and observed close; `tests/pi-process.test.ts` proves group sweeps on timeout, NORMAL EXIT, and cancellation with SIGTERM-ignoring descendants (readiness-driven, /proc-verified). `session_shutdown` aborts owned dispatches, but shutdown and cleanup-failure entry-path probes remain. |
-| T10 | R09 | M1, M2 | PARTIAL | `tests/receipts.test.ts` proves payload omission, secret sanitization, and error CLASSIFICATION (raw service bodies never persisted — real-SDK-APIError regression test); `tests/extension-entry.test.ts` verifies linked decision/dispatch receipts; Jev is skipped when prohibited. Full entry-path disclosure and unwritable-destination probes remain. |
+| T10 | R09 | M1, M2 | PARTIAL | `src/receipts.ts` now makes decision `reason`, `invalidationReason`, and dispatch `fallbackCause` category-typed and classifies them unconditionally inside the receipt builders; `tests/receipts.test.ts` behaviorally proves remote prompt/body text is absent from all three fields. `tests/extension-entry.test.ts` verifies linked decision/dispatch receipts; Jev is skipped when prohibited. Full entry-path disclosure and unwritable-destination probes remain. |
 | T11 | R01, R07, R10 | M1, M3 | PARTIAL | `tests/extension-entry.test.ts` runs the real registered `delegate_task` path with a disposable non-git temporary workspace and a real executable child fixture, checking launch, output, applied-model evidence, and linked receipts. A real provider-backed delegated task remains unavailable because Pi reports no configured models. |
 | T12 | R09, R10 | M4 | TODO | No fixed-versus-Jev quality/latency pilot has been run. The remaining work requires a configured provider-backed child and a paired live workload; no mock result is being counted as pilot evidence. |
 | T13 | R10, R11 | M5 | PARTIAL | `src/gate.ts` implements request-scoped manual/suggest/enforce decisions, and `src/index.ts` wires the gate into `before_agent_start`, system-prompt guidance, overrides, settlement, and steering (steering now regenerates the decision). `tests/gate.test.ts` covers advisory behavior, failure, cancellation, generation, fast-path invalidation without orphaned rejections, and late-answer isolation; live Pi parent-path evidence remains. |
 | T14 | R06, R09, R11 | M6 | PARTIAL | `ModeController.setRequestRestriction` and `guard` enforce base-policy intersection for delegate/blocked states; gate tests cover no widening and protected failure; hard base-mode policy resolves before the disclosure check (offline enforced modes verified). Real Pi alternate/dynamic-tool bypass and full unavailable-path entry probes remain. |
 | T15 | R06, R08, R11 | M5, M6 | PARTIAL | `DelegationGate` tracks generations, awaits bounded decisions, invalidates steering/session replacement, ignores late answers, and does not reuse decisions across changed policies with identical prompts; deterministic tests cover cancellation and generation replacement. A real Pi continuation/settlement ordering probe remains. |
 | T16 | R06, R08, R11 | M6 | PARTIAL | Enforced Jev failure, sensing-prohibited, missing-credential, and malformed-config paths fail closed (constructor throws eliminated; hook failures still install restrictions — real-ExtensionRunner probes verify). Explicit current-request overrides preserve the base policy and override late answers. Full enforced entry-path recovery and override probes remain. |
-| T17 | R09, R11 | M5, M6 | PARTIAL | Independent decision receipts and dispatch receipts are implemented, with `decisionId` links captured at admission and observed execution outcomes; `delegated` is only claimed after a child process starts (real-dist probe verification). No-execution, blocked, and mixed-outcome entry-path coverage remains. |
+| T17 | R09, R11 | M5, M6, M8 | PARTIAL | Independent decision receipts and dispatch receipts are implemented, with `decisionId` links captured at admission and observed execution outcomes; `delegated` is only claimed after a child process starts (real-dist probe verification). No-execution, blocked, mixed-outcome, and parallel-batch entry-path coverage remains. |
+| T18 | R07, R08, R12 | M7 | DONE | `src/child-extensions.ts` uses Pi 0.85.1 `SettingsManager`/`DefaultPackageManager` resolution, verifies owning manifests/entries, rejects pi-delegateau, and validates runtime tool provenance from the isolated probe in `src/pi-process.ts`. `tests/child-extensions.test.ts`, `tests/config.test.ts`, and `tests/pi-process.test.ts` cover package precedence, explicit failures, no-allowlist argv and tool ownership. Live registered-tool runs report `read, lens_diagnostics` with pi-lens and `read, grep` without an allowlist; an unknown package is a launch error. |
+| T19 | R02, R08, R13 | M8 | DONE | `src/admission.ts` implements the finite pool/FIFO queue and one idempotent settlement point; status reports running/blocked/queued capacity. Deterministic admission tests cover position changes, overflow, queued cancellation, double settlement and degraded slots. A live registered batch at concurrency 2 reported the third dispatch at queue position 1, two running timestamps before either settled, and promotion only after settlement. |
+| T20 | R07, R09, R13 | M8 | DONE | `src/index.ts` preserves the single form and adds mutually exclusive `assignments`; `src/dispatch.ts` gives each element an independent ID, lifecycle and receipt. `tests/extension-entry.test.ts` proves ordered three-element success plus ordered mixed success/failure with five independent receipts; the live batch returned three distinct successful IDs in input order. |
 
 ## Minimum failure matrix
 
@@ -364,11 +459,17 @@ where appropriate:
   visible manual advisory fallback and protected enforced failure with recovery.
 - Independent local/blocked/clarification/cancelled/mixed receipts, correct child
   linkage and no false acceptance/override labels for unobserved behavior.
-- Concurrent dispatch attempts and failure during each lifecycle stage.
+- Concurrent dispatch attempts, FIFO queue ordering/position updates, queue overflow,
+  queued cancellation/dequeue races, blocked individual slots and failure during
+  each lifecycle stage.
+- Legacy single input, empty/mixed/oversized batches, sibling failure/cancellation,
+  independent batch receipts and input-order aggregation.
 - Child spawn error, provider error despite zero exit, signal exit, hanging child,
   descendant process, wall-time/turn limit, cleanup failure and session shutdown.
 - Prohibited static/dynamic tools, alternate launch tools, mode change while busy.
-- Child extension loading, transcript sentinel isolation, non-git workspace.
+- Child extension loading by npm/git/local manifest and explicit path, settings
+  precedence, missing/ambiguous entries, tool ownership, recursion rejection,
+  absent/empty allowlist, transcript sentinel isolation, non-git workspace.
 - Private input in error text, unwritable receipt destination, bounded output.
 
 A mocked model choice is acceptable for exercising deterministic error paths. It

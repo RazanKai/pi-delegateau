@@ -14,6 +14,7 @@ describe("configuration", () => {
     expect(parseConfig({}).limits.childOutputChars).toBeGreaterThan(0);
     expect(parseConfig({}).limits.maxGatePromptChars).toBeGreaterThan(0);
     expect(parseConfig({}).limits.maxExpectedOutputChars).toBeGreaterThan(0);
+    expect(parseConfig({}).limits).toMatchObject({ concurrency: 3, maxQueueDepth: 20 });
   });
 
   it("validates the request gate policy and preserves model profile metadata", () => {
@@ -36,6 +37,21 @@ describe("configuration", () => {
   it("rejects child agents with unapproved tools", () => {
     expect(() => parseConfig({ agents: { worker: { instructions: "i", tools: ["bash", "shell"] } } })).toThrow("not approved child tools");
     expect(() => parseConfig({ agents: { worker: { instructions: "i", tools: ["read", "delegate_task"] } } })).toThrow("delegate_task");
+  });
+
+  it("accepts extension tools only with an explicit per-agent extension allowlist", () => {
+    expect(parseConfig({ agents: { worker: { instructions: "i", tools: ["read", "lens_diagnostics"], childExtensions: ["pi-lens"] } } }).agents.worker).toMatchObject({
+      tools: ["read", "lens_diagnostics"],
+      childExtensions: ["pi-lens"],
+    });
+    expect(() => parseConfig({ agents: { worker: { instructions: "i", tools: ["lens_diagnostics"] } } })).toThrow("not approved child tools");
+    expect(() => parseConfig({ agents: { worker: { instructions: "i", tools: ["read"], childExtensions: "pi-lens" } } })).toThrow("childExtensions must be an array");
+  });
+
+  it("validates pool limits", () => {
+    expect(parseConfig({ limits: { concurrency: 2, maxQueueDepth: 0 } }).limits).toMatchObject({ concurrency: 2, maxQueueDepth: 0 });
+    expect(() => parseConfig({ limits: { concurrency: 0 } })).toThrow("concurrency");
+    expect(() => parseConfig({ limits: { maxQueueDepth: -1 } })).toThrow("maxQueueDepth");
   });
 
   it("accepts an explicit child thinking level and rejects invalid ones", () => {

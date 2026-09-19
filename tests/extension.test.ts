@@ -21,6 +21,8 @@ describe("Pi extension entry point", () => {
     expect(tools.map((tool) => tool.name)).toContain("delegate_task");
     expect(commands.has("delegateau")).toBe(true);
     const ctx = { cwd: "/tmp", ui: { setStatus: () => undefined, notify: (text: string) => notifications.push(text) } };
+    await commands.get("delegateau").handler("status", ctx);
+    expect(notifications.at(-1)).toContain("slots=0/3 running=0 blocked=0, queue=0/20");
     await commands.get("delegateau").handler("enable coordinator-only", ctx);
     // coordinator-only admits only delegation; recovery is via the command
     // surface and conversation, not a nonexistent ask_user tool.

@@ -3,11 +3,21 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ChildEvent, ChildRequest } from "./types.js";
+import type { ProbedTool } from "./child-extensions.js";
 import type { ChildSpawner, SpawnResult } from "./runner.js";
 
 export interface PiProcessOptions {
   command?: string;
   killGraceMs?: number;
+}
+
+export interface ExtensionToolProbeOptions {
+  command?: string;
+  cwd: string;
+  extensionPaths: string[];
+  requestedTools: string[];
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
 /** True when the platform supports detached process groups we can signal. */
@@ -99,7 +109,9 @@ export class PiProcessSpawner implements ChildSpawner {
     ].filter(Boolean).join("\n\n");
     await fs.promises.writeFile(promptPath, prompt, { encoding: "utf8", mode: 0o600 });
 
-    const args = ["--mode", "json", "-p", "--no-session", "--no-extensions", "--model", `${request.model.provider}/${request.model.id}`];
+    const args = ["--mode", "json", "-p", "--no-session", "--no-extensions"];
+    for (const extensionPath of request.extensionPaths ?? []) args.push("-e", extensionPath);
+    args.push("--model", `${request.model.provider}/${request.model.id}`);
     if (request.thinking) args.push("--thinking", request.thinking);
     if (request.tools.length > 0) args.push("--tools", request.tools.join(","));
     else args.push("--no-tools");
@@ -301,6 +313,76 @@ export class PiProcessSpawner implements ChildSpawner {
         else request.signal.addEventListener("abort", onAbort, { once: true });
       }
     });
+  }
+}
+
+export async function probePiExtensionTools(options: ExtensionToolProbeOptions): Promise<ProbedTool[]> {
+  if (options.extensionPaths.length === 0) return [];
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-delegateau-probe-"));
+  const probePath = path.join(tempDir, "probe.ts");
+  const marker = `PI_DELEGATEAU_TOOLS_${process.pid}_${Date.now()}:`;
+  await fs.promises.writeFile(probePath, `export default function (pi: any) {\n  pi.on("session_start", (_event: any, ctx: any) => {\n    const tools = pi.getAllTools().map((tool: any) => ({ name: tool.name, source: tool.sourceInfo }));\n    process.stdout.write(${JSON.stringify(marker)} + JSON.stringify(tools) + "\\n");\n    ctx.shutdown();\n  });\n}\n`, { encoding: "utf8", mode: 0o600 });
+
+  try {
+    return await new Promise<ProbedTool[]>((resolve, reject) => {
+      const args = ["--offline", "--no-extensions"];
+      for (const extensionPath of options.extensionPaths) args.push("-e", extensionPath);
+      args.push("-e", probePath, "--mode", "rpc", "--no-session", "--tools", options.requestedTools.join(","));
+      const child = spawnProcess(options.command ?? process.env.PI_DELEGAU_PI_COMMAND ?? "pi", args, {
+        cwd: options.cwd,
+        shell: false,
+        detached: supportsProcessGroups(),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      const timeoutMs = options.timeoutMs ?? 15_000;
+      const stop = () => {
+        if (child.pid !== undefined && !signalGroup(child.pid, "SIGKILL")) signalChild(child, "SIGKILL");
+      };
+      const finish = (error?: Error, tools?: ProbedTool[]) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onAbort);
+        if (error) reject(error);
+        else resolve(tools ?? []);
+      };
+      const onAbort = () => {
+        stop();
+        finish(new Error("Child extension tool validation cancelled"));
+      };
+      const timer = setTimeout(() => {
+        stop();
+        finish(new Error(`Child extension tool validation timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      child.stdout?.on("data", (data: Buffer) => { stdout = (stdout + data.toString("utf8")).slice(-200_000); });
+      child.stderr?.on("data", (data: Buffer) => { stderr = (stderr + data.toString("utf8")).slice(-200_000); });
+      child.once("error", (error) => finish(error));
+      child.once("close", (code) => {
+        if (settled) return;
+        // Pi's RPC output guard may route extension writes to stderr so they
+        // cannot corrupt protocol stdout; accept the private marker on either
+        // stream and ignore unrelated diagnostics.
+        const line = `${stdout}\n${stderr}`.split("\n").find((candidate) => candidate.startsWith(marker));
+        if (code !== 0 || !line) {
+          finish(new Error(`Child extension tool validation failed${code === null ? "" : ` (exit ${code})`}: ${stderr || "probe produced no tool metadata"}`));
+          return;
+        }
+        try {
+          const parsed = JSON.parse(line.slice(marker.length));
+          if (!Array.isArray(parsed)) throw new Error("probe metadata is not an array");
+          finish(undefined, parsed as ProbedTool[]);
+        } catch (error) {
+          finish(new Error(`Child extension tool validation returned invalid metadata: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      });
+      if (options.signal?.aborted) onAbort();
+      else options.signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  } finally {
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
   }
 }
 

@@ -28,8 +28,9 @@ specification in full.
 
 ### V1 scope
 
-- One model-facing delegation tool, one assignment per invocation.
-- One active dispatch per parent extension instance, enforced in code.
+- One model-facing delegation tool with compatible single-assignment and bounded batch forms.
+- A configured number of active dispatches per parent extension instance, with a bounded FIFO queue.
+- Per-agent opt-in child-extension allowlists; absent or empty allowlists preserve built-in-only children.
 - Jev selection or fixed selection; explicit eligible default and optional pins.
 - Optional Jev local-versus-delegated decision: manual, advisory, or enforced.
 - Normal, delegate-execution, and coordinator-only parent modes.
@@ -48,8 +49,8 @@ work queue, parallel reader/writer scheduler, or worktree manager in v1.
 - Child model switching, adaptive thinking, learning, utility optimization, or
   global budgets/work graphs.
 - Jev generating subtasks, granting permissions, or operating tools.
-- Nested delegation, parallel batches, chains, or an automatic retry on another
-  model after a child starts.
+- Nested delegation, chains, worktree scheduling, or an automatic retry on
+  another model after a child starts.
 - An OS security sandbox, protection against malicious installed extensions, or
   global interception of third-party subagent launchers in normal mode.
 - Pi core patches, production installation, or changes to Hermes.
@@ -167,17 +168,18 @@ runtime. Record the provenance and license of adapted source. Use supported Pi
 APIs, not defensive guessing of argument positions across unknown versions.
 If the required seam does not exist, report the blocker before changing scope.
 
-### R02 — Bounded sequential dispatch
+### R02 — Bounded dispatch admission
 
-Resolve the agent and task and acquire an in-memory dispatch admission lock before
-any sensing or child launch. A second invocation receives a clear busy result;
-there is no queue. Hold the lock through selection, execution, and cleanup and
-release it on success, failure, cancellation, and startup errors.
+Resolve each agent and assignment and acquire an in-memory dispatch slot before
+any sensing or child launch. Hold that slot through selection, execution, and
+cleanup and settle it on success, failure, cancellation, and startup errors.
+R13 defines the pool, queue, blocked-slot and batch semantics that replace the
+original single-dispatch lock; admission remains local to one extension instance.
 
-The lock covers this parent extension instance only. It does not coordinate other
-Pi sessions or user processes; document that limitation. Do not claim a global
-single-writer guarantee. Children cannot invoke this or another delegation tool
-through their enabled toolset. No automatic recursive launch capability is loaded.
+The pool does not coordinate other Pi sessions or user processes; document that
+limitation. Do not claim a global concurrency or single-writer guarantee. Children
+cannot invoke this or another delegation tool through their enabled toolset. No
+automatic recursive launch capability is loaded.
 
 ### R03 — Eligibility, profiles, and precedence
 
@@ -376,9 +378,11 @@ parent model or let selection expand permissions. Isolate child conversation sta
 Pi's documented project instructions may still apply and must be distinguished
 from parent transcript inheritance. Project-local agents require trust approval.
 
-Control child extension/tool loading to prevent recursive delegation. Do not
-assume a built-in tool flag also disables tools from loaded extensions; verify
-that behavior on the pinned Pi version.
+Control child extension/tool loading to prevent recursive delegation. Default to
+no child extension discovery, and apply R12's per-agent explicit allowlist without
+removing `--no-extensions`. Do not assume a built-in tool flag also disables tools
+from loaded extensions; verify loading and activation behavior on the pinned Pi
+version.
 
 Preserve useful streaming, bounded output, diagnostics, and available usage.
 Confirm the applied model through child runtime/provider evidence, not only the
@@ -443,6 +447,73 @@ must not be marketed as redacting the whole Pi session. No hidden reasoning logs
 Telemetry failure may warn without blocking otherwise permitted work. Report
 unknown costs as unknown; do not invent a textual explanation for Jev's decision.
 
+### R12 — Per-agent child-extension allowlist
+
+A trusted agent may define `childExtensions` as an array of extension names or
+explicit paths. Missing or empty arrays preserve the existing child surface:
+built-in tools only and no explicit `-e` arguments. This is opt-in and must never
+widen the default. Keep `--no-extensions` in every child launch so discovery stays
+disabled; append one `-e <absolute-entry>` pair per resolved allowlist entry, and
+continue to use `--tools` as the activation allowlist across built-in and extension
+tools.
+
+Resolve a name only from Pi package declarations installed in the effective
+settings sources: `<agentDir>/settings.json` (where `PI_CODING_AGENT_DIR` overrides
+`~/.pi/agent`) and the trusted project's `.pi/settings.json`. Read each `packages`
+entry, locate the installed package according to Pi's npm, git, or local-package
+layout, and derive extension entries from that package's `pi.extensions` manifest.
+Do not guess conventional entry filenames. Apply Pi's package identity and project
+override precedence. Resolve `~` and absolute path selectors explicitly; paths
+must exist. A name that is absent or ambiguous, a missing path, an invalid manifest,
+or a package with no declared extension entry is a launch error for that dispatch.
+Never silently skip a requested extension.
+
+An explicit path must resolve to an extension entry declared by an owning package
+manifest; a package directory may resolve only through its manifest. Reject
+`pi-delegateau` by package identity, canonical entry identity, and resolved package
+root regardless of how it was selected. Also reject `delegate_task` in every child
+tool list. No allowlist or alias may create recursive delegation.
+
+Validate child tools against the union of approved built-ins and tool names
+provided by the resolved allowlisted extensions. Tool ownership must come from
+runtime extension metadata or a bounded, isolated registration probe; filenames
+and documentation are not proof. Unknown names fail before child launch. Preserve
+the existing approval rule for `bash`, `powershell`, `edit`, and `write`: extension
+loading cannot make those tools newly approvable or bypass current policy.
+
+### R13 — Parallel slot pool, FIFO queue, and batch dispatch
+
+Replace the single admission lock with a configured slot pool. `concurrency`
+defaults to 3 and `maxQueueDepth` is finite and configurable. Each assignment owns
+one queue position or one slot, never both. If a slot is available it starts
+immediately; otherwise it enters one instance-local FIFO queue. A full queue fails
+clearly before sensing or launch. A queued caller waits, and every position change
+is reported through `onUpdate` using a one-based queue position.
+
+Queue cancellation is terminal: remove the entry, wake its waiter, update later
+positions, and never start it or consume a slot. Recheck cancellation while
+transferring an entry from queue to running. A running cancellation only aborts
+its owned work and lets the normal settle path decide whether the slot is released
+or blocked. Centralize slot settlement in exactly one operation and make it
+idempotent; no abort, dequeue, startup failure, or late callback may double-release.
+
+An observed child exit and verified process-group sweep release the slot after the
+dispatch settles, regardless of child success or failure. If either cannot be
+verified, convert that occupied slot to blocked/degraded state and never silently
+reuse it. Other healthy slots remain usable. Status reports configured capacity,
+running, queued and blocked counts plus sanitized blocked reasons. Shutdown
+cancels queued entries and running work, then lets running cleanup settle under
+the same truthfulness rule.
+
+`delegate_task` accepts either the existing single assignment fields or an
+`assignments` array. Reject mixed forms, empty batches, and batches that cannot fit
+the configured running-plus-queue capacity at admission time. Every batch element
+is independently validated, selected, queued, launched, cancelled, receipted and
+identified by its own dispatch ID. Run batch elements concurrently subject to the
+same pool and return results in input order. One element's ordinary failure does
+not erase sibling receipts; cancellation propagates to queued and running siblings.
+The batch result must not collapse distinct outcomes into one claimed success.
+
 ### R10 — Evidence and useful scope
 
 Test the actual extension dispatch path and hooks, not only internal functions.
@@ -466,7 +537,7 @@ or credential blocker leaves live acceptance incomplete, not silently waived.
 
 Use a handful of modules with real consumers, not a scheduler framework:
 
-- Extension entry: tool/commands, mode lifecycle, dispatch admission.
+- Extension entry: tool/commands and mode lifecycle; dedicated modules own batch orchestration, extension resolution and dispatch admission.
 - Configuration/eligibility: profiles, exact identities, pins and hard constraints.
 - Delegation gate: optional Jev local-versus-delegated decision and tool-surface
   policy.
@@ -480,10 +551,10 @@ Separate lifecycles:
   execution -> settled`. Failure can enter a blocked state with explicit recovery.
   Cancellation or material steering invalidates the request generation. No child
   is necessary for this lifecycle or its receipt to complete.
-- Child dispatch: `admitted -> selecting -> running -> cleaning-up -> idle`.
-  Errors and cancellation enter cleanup. Fixed/pinned paths skip model sensing,
-  not eligibility. A busy response acquires no lease. Child model selection is
-  not revisited after launch.
+- Child dispatch: `validating -> queued/admitted -> selecting -> running ->
+  cleaning-up -> settled|blocked`. Errors and cancellation enter cleanup. Fixed/
+  pinned paths skip model sensing, not eligibility. A rejected full-queue entry
+  acquires no slot. Child model selection is not revisited after launch.
 
 One effective-policy resolver combines stable user mode with the request gate for
 both tool presentation and actual guards. Manual policy makes no delegation-gate
@@ -496,7 +567,7 @@ cancellation and child cleanup distinct rather than overloading one state machin
 | --- | --- | --- |
 | T01 | Standalone load, attribution and supported API integration without pi-foreman installed | R01 |
 | T02 | Real tool invocation launches explicit-model child; parent model unchanged; execution errors reported accurately | R02, R07 |
-| T03 | Simultaneous dispatch attempts admit only one; terminal cleanup permits a later call | R02, R08 |
+| T03 | Dispatch admission holds capacity through cleanup; terminal cleanup permits later work and unverified cleanup remains blocked | R02, R08, R13 |
 | T04 | Pins/default/single-candidate/empty-set precedence and eligibility enforced without unnecessary Jev calls | R03, R05 |
 | T05 | Live Jev Choice reaches the real child launch and applied model matches the validated selection | R04, R07 |
 | T06 | Sensor failures use only eligible fallback; changed eligibility blocks an invalid launch | R03, R05 |
@@ -511,6 +582,9 @@ cancellation and child cleanup distinct rather than overloading one state machin
 | T15 | One judgment per request generation; awaited ordering, steering/expiry, override and late responses cannot leak policy across runs or reclassify child returns | R06, R08, R11 |
 | T16 | Gate failure blocks protected execution but preserves user recovery; overrides are visible, request-scoped and cannot widen base permissions | R06, R08, R11 |
 | T17 | Local-only, blocked, no-execution, cancelled and mixed outcomes have independent decision receipts; child dispatches link without claiming unobserved agreement | R09, R11 |
+| T18 | Per-agent child-extension allowlists resolve Pi package manifests and explicit paths fail closed; absent/empty stays built-in-only and pi-delegateau/delegate_task cannot enter a child | R07, R08, R12 |
+| T19 | Configured parallel slots overlap real children, FIFO overflow waits with position updates, queued cancellation never starts late, and blocked cleanup degrades only its owning slot | R02, R08, R13 |
+| T20 | Single form remains compatible; batch assignments receive independent dispatch IDs, ordered results and receipts while sharing the same bounded pool and cancellation rules | R07, R09, R13 |
 
 ## 7. Authoritative integration references
 

@@ -1,5 +1,13 @@
 const COMPLETE_STOP_REASONS = new Set(["stop", "toolUse"]);
 const INCOMPLETE_STOP_REASONS = new Set(["error", "aborted", "length", "deferred", "pending"]);
+/**
+ * Reasons that mean the child is asking to continue (a tool call it expects to
+ * run, or a turn it wants to keep going). Only these can lead to more
+ * inference, so only these justify refusing the next turn at the budget edge.
+ * An absent reason is treated as terminal on purpose: without evidence of
+ * continuation, aborting would discard work that may already be complete.
+ */
+const CONTINUATION_STOP_REASONS = new Set(["toolUse"]);
 function identityFromEvidence(value) {
     if (!value)
         return undefined;
@@ -85,9 +93,17 @@ export class ChildRunner {
             const process = await this.spawner.spawn(spawnRequest, (event) => {
                 if (event.type === "assistant") {
                     turns += 1;
-                    // Turn budget: reject the turn that would exceed the limit BEFORE
-                    // consuming it, so no inference beyond the budget is counted (F11).
-                    if (request.maxTurns !== undefined && turns > request.maxTurns) {
+                    // Turn budget (F11): the budget exists to stop RUNAWAY work, so it
+                    // may only refuse a turn the child is about to START. The previous
+                    // form aborted whenever the count passed the limit, regardless of
+                    // whether that turn had already finished — so a child that produced
+                    // its final answer on the last allowed turn was killed and reported
+                    // as `limit-exceeded`, discarding completed output. Only a turn that
+                    // signals continuation can lead to more inference, so only that case
+                    // aborts; a terminal turn is left to settle normally.
+                    if (request.maxTurns !== undefined &&
+                        turns >= request.maxTurns &&
+                        CONTINUATION_STOP_REASONS.has(event.stopReason ?? "")) {
                         limitExceeded = true;
                         controller.abort();
                     }

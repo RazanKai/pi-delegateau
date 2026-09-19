@@ -28,7 +28,10 @@ export interface ReceiptInput {
     groupCleaned?: boolean;
     outputTruncated?: boolean;
 }
-export type Receipt = Omit<ReceiptInput, "task" | "expectedOutput" | "context">;
+export type ReceiptErrorCategory = "credential-missing" | "timeout" | "invalid-response" | "cancelled" | "sensing-prohibited" | "sensor-error";
+export type Receipt = Omit<ReceiptInput, "task" | "expectedOutput" | "context" | "fallbackCause"> & {
+    fallbackCause?: ReceiptErrorCategory;
+};
 export interface DecisionReceiptInput {
     decisionId: string;
     generation: number;
@@ -50,8 +53,13 @@ export interface DecisionReceiptInput {
     latencyMs?: number;
     usage?: unknown;
 }
-export type DecisionReceipt = DecisionReceiptInput;
-export declare function classifyError(message: string | undefined): string | undefined;
+export type DecisionReceipt = Omit<DecisionReceiptInput, "reason" | "invalidationReason"> & {
+    reason?: ReceiptErrorCategory;
+    invalidationReason?: ReceiptErrorCategory;
+};
+export declare function classifyError(message: string): ReceiptErrorCategory;
+export declare function classifyError(message: undefined): undefined;
+export declare function classifyError(message: string | undefined): ReceiptErrorCategory | undefined;
 export declare function buildDecisionReceipt(decision: DelegationDecision, outcome: string): DecisionReceipt;
 /**
  * Sanitize an error message for display. NOTE: this is for transient UI text

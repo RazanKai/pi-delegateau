@@ -9,3 +9,9 @@ The exact upstream license is reproduced in `THIRD_PARTY_LICENSES/pi-foreman-MIT
 The current Pi subagent example was used as the process/event compatibility
 reference. No pi-foreman workflow, planner, gates, validator, git, repo-map, or
 repair-loop code is included.
+
+`@tintinweb/pi-subagents` 0.19.0 was consulted for the mechanisms behind
+package-aware extension naming and FIFO pool settlement. pi-delegateau's
+implementation is independent and does not copy its code, but the reference is
+MIT-licensed and its notice is retained in
+`THIRD_PARTY_LICENSES/pi-subagents-MIT.txt`.
