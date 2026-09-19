@@ -1,6 +1,7 @@
 import {
   modelKey,
   sameModel,
+  type CandidateProfile,
   type DelegateRequest,
   type JevChoiceAnswer,
   type JevChoiceInput,
@@ -40,6 +41,30 @@ function validateRequest(request: DelegateRequest): void {
   if (request.selectionDeadlineMs !== undefined && request.selectionDeadlineMs <= 0) {
     throw new Error("selectionDeadlineMs must be positive");
   }
+}
+
+/**
+ * Side-effect-free resolution of the launch model for a request, exactly as
+ * dispatch will apply it: pin -> fixed -> single-candidate -> jev -> fallback.
+ * The gate uses this to decide child availability, so its notion of "a usable
+ * child exists" matches what delegate_task can actually launch (F09).
+ */
+export function resolveLaunchModel(request: DelegateRequest, choose?: (input: JevChoiceInput) => Promise<JevChoiceAnswer>): ModelIdentity | undefined {
+  const agent = request.agent;
+  if (agent.model) {
+    return findCandidate(request, agent.model) ? agent.model : undefined;
+  }
+  if (request.selectionMode === "fixed" || !request.allowExternalSensing) {
+    if (!request.defaultModel) return request.candidates.length > 0 ? request.candidates[0]!.identity : undefined;
+    return findCandidate(request, request.defaultModel) ? request.defaultModel : undefined;
+  }
+  if (request.candidates.length === 0) return request.defaultModel && findCandidate(request, request.defaultModel) ? request.defaultModel : undefined;
+  if (request.candidates.length === 1) return request.candidates[0]!.identity;
+  // Jev mode with multiple candidates: availability requires a resolvable
+  // chooser AND an eligible fallback/default for sensor failures.
+  if (typeof choose !== "function") return undefined;
+  if (request.defaultModel && findCandidate(request, request.defaultModel)) return request.defaultModel;
+  return undefined;
 }
 
 async function chooseWithDeadline(request: DelegateRequest, runtime: ChoiceRuntime): Promise<JevChoiceAnswer> {

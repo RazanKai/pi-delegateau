@@ -5,9 +5,11 @@ import type {
   DelegationMode,
   DelegateConfig,
   DelegateLimits,
+  DelegationPolicy,
   ModelIdentity,
   RoutingPreference,
   SelectionMode,
+  ThinkingLevel,
   TrustedAgent,
 } from "./types.js";
 import { modelKey } from "./types.js";
@@ -19,12 +21,25 @@ const DEFAULT_LIMITS: DelegateLimits = {
   childOutputChars: 50_000,
   maxTaskChars: 20_000,
   maxContextChars: 20_000,
+  maxExpectedOutputChars: 20_000,
+  maxGatePromptChars: 20_000,
 };
 
+// Tools that execute commands or mutate the repository; excluded from
+// delegate-execution and the enforced "delegate" request restriction.
+const MUTATION_TOOLS = new Set(["bash", "powershell", "edit", "write"]);
+// Parent-side recovery surface that stays available under a failed or
+// blocked enforced decision. Kept minimal on purpose: status commands and
+// the override command are always reachable; these are tool-level names only.
+const KNOWN_COORDINATION_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const CHILD_TOOLS = new Set(["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"]);
+
 const DEFAULT_ALLOWED = {
-  delegateExecution: ["delegate_task", "read", "search"],
-  coordinatorOnly: ["delegate_task", "ask_user"],
+  delegateExecution: ["delegate_task", "read", "grep", "find", "ls"],
+  coordinatorOnly: ["delegate_task"],
 };
+
+const THINKING_LEVELS: readonly string[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -50,8 +65,25 @@ function readCandidate(value: unknown, index: number): CandidateProfile {
   const limitations = Array.isArray(value.limitations)
     ? value.limitations.filter((item): item is string => typeof item === "string")
     : undefined;
+  const contextWindow = value.contextWindow === undefined ? undefined : readPositiveInt(value.contextWindow, `candidates[${index}].contextWindow`, 1);
+  const latencyMs = value.latencyMs === undefined ? undefined : readPositiveInt(value.latencyMs, `candidates[${index}].latencyMs`, 1);
+  const cost = isRecord(value.cost)
+    ? {
+        ...(typeof value.cost.input === "number" && Number.isFinite(value.cost.input) && value.cost.input >= 0 ? { input: value.cost.input } : {}),
+        ...(typeof value.cost.output === "number" && Number.isFinite(value.cost.output) && value.cost.output >= 0 ? { output: value.cost.output } : {}),
+      }
+    : undefined;
   const provenance = value.provenance === "built-in" ? "built-in" : "user";
-  return { identity, description, capabilities, ...(limitations ? { limitations } : {}), provenance };
+  return {
+    identity,
+    description,
+    capabilities,
+    ...(limitations ? { limitations } : {}),
+    provenance,
+    ...(contextWindow ? { contextWindow } : {}),
+    ...(latencyMs ? { latencyMs } : {}),
+    ...(cost && Object.keys(cost).length > 0 ? { cost } : {}),
+  };
 }
 
 function readPositiveInt(value: unknown, name: string, fallback: number): number {
@@ -60,12 +92,35 @@ function readPositiveInt(value: unknown, name: string, fallback: number): number
   return value;
 }
 
+function readChildTools(value: unknown, name: string): string[] {
+  const tools = Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
+    : [];
+  const invalid = tools.filter((tool) => !CHILD_TOOLS.has(tool));
+  if (invalid.length > 0) throw new Error(`${name} tools are not approved child tools: ${invalid.join(", ")}`);
+  return [...new Set(tools)];
+}
+
+/**
+ * Intersect a configured parent allowlist with a safe maximum. The user may
+ * remove capabilities from an enforced mode but never re-admit command
+ * execution or mutation tools that the mode exists to withhold.
+ */
+function sanitizeAllowedTools(configured: string[], fallback: string[], mode: "delegate-execution" | "coordinator-only"): string[] {
+  const base = configured.length > 0 ? configured : fallback;
+  const safe = base.filter((name) => !MUTATION_TOOLS.has(name));
+  if (!safe.includes("delegate_task")) safe.push("delegate_task");
+  return [...new Set(safe)];
+}
+
 export function parseConfig(raw: unknown): DelegateConfig {
   const input = isRecord(raw) ? raw : {};
   const selection = (input.selection ?? "fixed") as SelectionMode;
+  const delegationDecision = (input.delegationDecision ?? "manual") as DelegationPolicy;
   const mode = (input.mode ?? "normal") as DelegationMode;
   const preference = (input.preference ?? "balanced") as RoutingPreference;
-  if (!(["fixed", "jev"] as string[]).includes(selection)) throw new Error("selection must be fixed or jev");
+  if (!( ["fixed", "jev"] as string[]).includes(selection)) throw new Error("selection must be fixed or jev");
+  if (!( ["manual", "jev-suggest", "jev-enforce"] as string[]).includes(delegationDecision)) throw new Error("delegationDecision is invalid");
   if (!( ["normal", "delegate-execution", "coordinator-only"] as string[]).includes(mode)) throw new Error("mode is invalid");
   if (!( ["economy", "balanced", "quality"] as string[]).includes(preference)) throw new Error("preference is invalid");
 
@@ -84,13 +139,10 @@ export function parseConfig(raw: unknown): DelegateConfig {
   const agents: Record<string, TrustedAgent> = {};
   for (const [name, value] of Object.entries(agentsInput)) {
     if (!isRecord(value)) throw new Error(`agents.${name} must be an object`);
-    const tools = Array.isArray(value.tools)
-      ? value.tools.filter((item): item is string => typeof item === "string" && item.length > 0)
-      : [];
     const agent: TrustedAgent = {
       name,
       instructions: readString(value.instructions, `agents.${name}.instructions`),
-      tools,
+      tools: readChildTools(value.tools, `agents.${name}`),
       ...(value.model === undefined ? {} : { model: readIdentity(value.model, `agents.${name}.model`) }),
     };
     agents[name] = agent;
@@ -107,14 +159,22 @@ export function parseConfig(raw: unknown): DelegateConfig {
     childOutputChars: readPositiveInt(limitsInput.childOutputChars, "childOutputChars", DEFAULT_LIMITS.childOutputChars),
     maxTaskChars: readPositiveInt(limitsInput.maxTaskChars, "maxTaskChars", DEFAULT_LIMITS.maxTaskChars),
     maxContextChars: readPositiveInt(limitsInput.maxContextChars, "maxContextChars", DEFAULT_LIMITS.maxContextChars),
+    maxExpectedOutputChars: readPositiveInt(limitsInput.maxExpectedOutputChars, "maxExpectedOutputChars", DEFAULT_LIMITS.maxExpectedOutputChars),
+    maxGatePromptChars: readPositiveInt(limitsInput.maxGatePromptChars, "maxGatePromptChars", DEFAULT_LIMITS.maxGatePromptChars),
   };
 
   const allowedInput = isRecord(input.allowedParentTools) ? input.allowedParentTools : {};
-  const readTools = (value: unknown, fallback: string[]) =>
-    Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : fallback;
+  const readTools = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
+
+  const childThinking = input.childThinking === undefined ? undefined : readString(input.childThinking, "childThinking") as ThinkingLevel;
+  if (childThinking !== undefined && !THINKING_LEVELS.includes(childThinking)) {
+    throw new Error(`childThinking must be one of: ${THINKING_LEVELS.join(", ")}`);
+  }
 
   return {
     selection,
+    delegationDecision,
     mode,
     preference,
     candidates,
@@ -123,15 +183,18 @@ export function parseConfig(raw: unknown): DelegateConfig {
     agents,
     allowExternalSensing: input.allowExternalSensing !== false,
     allowedParentTools: {
-      delegateExecution: readTools(allowedInput.delegateExecution, DEFAULT_ALLOWED.delegateExecution),
-      coordinatorOnly: readTools(allowedInput.coordinatorOnly, DEFAULT_ALLOWED.coordinatorOnly),
+      delegateExecution: sanitizeAllowedTools(readTools(allowedInput.delegateExecution), DEFAULT_ALLOWED.delegateExecution, "delegate-execution"),
+      coordinatorOnly: sanitizeAllowedTools(readTools(allowedInput.coordinatorOnly), DEFAULT_ALLOWED.coordinatorOnly, "coordinator-only"),
     },
     limits,
+    ...(childThinking ? { childThinking } : {}),
     ...(typeof input.receiptPath === "string" && input.receiptPath ? { receiptPath: input.receiptPath } : {}),
+    ...(typeof input.decisionReceiptPath === "string" && input.decisionReceiptPath ? { decisionReceiptPath: input.decisionReceiptPath } : {}),
+    ...(typeof input.piCommand === "string" && input.piCommand ? { piCommand: input.piCommand } : {}),
   };
 }
 
-export { DEFAULT_LIMITS };
+export { DEFAULT_LIMITS, KNOWN_COORDINATION_TOOLS, MUTATION_TOOLS, CHILD_TOOLS };
 
 export const CONFIG_FILE_NAME = ".pi/delegateau.json";
 

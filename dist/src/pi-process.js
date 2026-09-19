@@ -2,11 +2,82 @@ import { spawn as spawnProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+/** True when the platform supports detached process groups we can signal. */
+function supportsProcessGroups() {
+    return process.platform === "linux" || process.platform === "darwin";
+}
+/** Signal a whole process group, if we own a detached one. */
+function signalGroup(pid, signal) {
+    if (pid === undefined)
+        return false;
+    if (!supportsProcessGroups())
+        return false;
+    try {
+        process.kill(-pid, signal);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+/** Direct-child signal (no group). */
+function signalChild(child, signal) {
+    try {
+        child.kill(signal);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * Probe whether the owned process group still has live members other than the
+ * direct child (which may already be reaped). On Linux this reads /proc for
+ * processes whose PGID equals our child's PID.
+ */
+function groupHasSurvivors(pid, detached) {
+    if (pid === undefined || !detached)
+        return false;
+    if (process.platform !== "linux") {
+        // Conservative on other platforms: assume survivors may exist; the caller
+        // escalates with SIGKILL to the group, which is a no-op if all exited.
+        return true;
+    }
+    try {
+        const entries = fs.readdirSync("/proc").filter((entry) => /^\d+$/.test(entry));
+        for (const entry of entries) {
+            const numeric = Number(entry);
+            if (numeric === pid || numeric === process.pid)
+                continue;
+            try {
+                const stat = fs.readFileSync(`/proc/${entry}/stat`, "utf8");
+                const close = stat.lastIndexOf(")");
+                if (close < 0)
+                    continue;
+                const fields = stat.slice(close + 2).split(" ");
+                const state = fields[0];
+                if (state === "Z" || state === "X")
+                    continue; // zombie/dead: not a survivor
+                // fields after ')': [0]=state [1]=ppid [2]=pgrp (stat(5))
+                const pgrp = Number(fields[2]);
+                if (pgrp === pid)
+                    return true;
+            }
+            catch {
+                // /proc entry vanished: not a survivor
+            }
+        }
+    }
+    catch {
+        return true; // cannot verify: be conservative
+    }
+    return false;
+}
 export class PiProcessSpawner {
     command;
     killGraceMs;
     constructor(options = {}) {
-        this.command = options.command ?? "pi";
+        this.command = options.command ?? process.env.PI_DELEGAU_PI_COMMAND ?? "pi";
         this.killGraceMs = options.killGraceMs ?? 5_000;
     }
     async spawn(request, emit) {
@@ -25,6 +96,8 @@ export class PiProcessSpawner {
         ].filter(Boolean).join("\n\n");
         await fs.promises.writeFile(promptPath, prompt, { encoding: "utf8", mode: 0o600 });
         const args = ["--mode", "json", "-p", "--no-session", "--no-extensions", "--model", `${request.model.provider}/${request.model.id}`];
+        if (request.thinking)
+            args.push("--thinking", request.thinking);
         if (request.tools.length > 0)
             args.push("--tools", request.tools.join(","));
         else
@@ -42,8 +115,11 @@ export class PiProcessSpawner {
             let child;
             let closed = false;
             let settled = false;
+            let terminated = false;
+            let groupCleaned = !supportsProcessGroups() ? true : undefined;
             let buffer = "";
             let killTimer;
+            let escalationTimer;
             let removeAbortListener = () => { };
             const finish = (result) => {
                 if (settled)
@@ -52,41 +128,78 @@ export class PiProcessSpawner {
                 removeAbortListener();
                 if (killTimer)
                     clearTimeout(killTimer);
+                if (escalationTimer)
+                    clearTimeout(escalationTimer);
                 resolve(result);
             };
+            // Signal the group, then the direct child as a fallback, so a group
+            // signal failure does not silently leave the child alive.
             const signalProcess = (signal) => {
-                if (!child || closed || child.pid === undefined)
+                if (child?.pid === undefined)
                     return;
-                try {
-                    if (process.platform === "linux" || process.platform === "darwin")
-                        process.kill(-child.pid, signal);
-                    else
-                        child.kill(signal);
-                }
-                catch {
-                    try {
-                        child.kill(signal);
-                    }
-                    catch {
-                        // The close event remains the source of truth for observed exit.
-                    }
+                const viaGroup = signalGroup(child.pid, signal);
+                if (!viaGroup || signal === "SIGKILL") {
+                    if (child && !closed)
+                        signalChild(child, signal);
                 }
             };
-            const terminate = () => {
-                if (closed)
+            // Terminate the whole owned group. Crucially this runs even when the
+            // direct child has already closed: a direct exit does NOT imply the
+            // group is empty (F04).
+            const terminateGroup = () => {
+                if (terminated)
+                    return;
+                terminated = true;
+                if (child?.pid === undefined)
                     return;
                 signalProcess("SIGTERM");
                 killTimer = setTimeout(() => signalProcess("SIGKILL"), this.killGraceMs);
+            };
+            // After the direct child closes, sweep any surviving group members:
+            // SIGTERM them, wait the grace period, then SIGKILL the group. The
+            // kill timer must NOT be cleared just because the direct child exited.
+            const sweepGroup = () => {
+                const pid = child?.pid;
+                if (!supportsProcessGroups() || pid === undefined) {
+                    groupCleaned = true;
+                    return;
+                }
+                if (!terminated) {
+                    if (groupHasSurvivors(pid, true)) {
+                        signalGroup(pid, "SIGTERM");
+                        killTimer = setTimeout(() => signalGroup(pid, "SIGKILL"), this.killGraceMs);
+                    }
+                    else {
+                        groupCleaned = true;
+                        return;
+                    }
+                }
+                // Verify group emptiness after the grace period; if anything survives,
+                // keep escalating with SIGKILL until clean or bounded retries end.
+                const verify = (attempt) => {
+                    if (!groupHasSurvivors(pid, true)) {
+                        groupCleaned = true;
+                        return;
+                    }
+                    if (attempt <= 0) {
+                        groupCleaned = false;
+                        return;
+                    }
+                    signalGroup(pid, "SIGKILL");
+                    escalationTimer = setTimeout(() => verify(attempt - 1), this.killGraceMs);
+                };
+                escalationTimer = setTimeout(() => verify(3), this.killGraceMs);
             };
             try {
                 child = spawnProcess(this.command, args, {
                     cwd: request.cwd,
                     shell: false,
-                    detached: process.platform === "linux" || process.platform === "darwin",
+                    detached: supportsProcessGroups(),
                     stdio: ["ignore", "pipe", "pipe"],
                 });
             }
             catch (error) {
+                groupCleaned = true;
                 reject(error);
                 return;
             }
@@ -98,7 +211,7 @@ export class PiProcessSpawner {
                     event = JSON.parse(line);
                 }
                 catch {
-                    emit({ type: "diagnostic", text: line });
+                    emit({ type: "diagnostic", text: line.slice(-2_000) });
                     return;
                 }
                 if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -111,13 +224,21 @@ export class PiProcessSpawner {
                         ...(typeof event.message.model === "string"
                             ? { model: typeof event.message.provider === "string" ? `${event.message.provider}/${event.message.model}` : event.message.model }
                             : {}),
+                        // Provider-served identity evidence (F06): Pi records what the
+                        // gateway actually served in responseModel, distinct from the
+                        // requested model echoed in `model`.
+                        ...(typeof event.message.responseModel === "string" && event.message.responseModel.length > 0
+                            ? { responseModel: event.message.responseModel }
+                            : {}),
                         ...(typeof event.message.stopReason === "string" ? { stopReason: event.message.stopReason } : {}),
                         ...(typeof event.message.errorMessage === "string" ? { errorMessage: event.message.errorMessage } : {}),
                         ...(event.message.usage ? {
                             usage: {
                                 inputTokens: event.message.usage.input,
                                 outputTokens: event.message.usage.output,
-                                totalTokens: event.message.usage.totalTokens,
+                                totalTokens: event.message.usage.total,
+                                ...(typeof event.message.usage.cacheRead === "number" ? { cacheReadTokens: event.message.usage.cacheRead } : {}),
+                                ...(typeof event.message.usage.cacheWrite === "number" ? { cacheWriteTokens: event.message.usage.cacheWrite } : {}),
                                 cost: event.message.usage.cost?.total,
                             },
                         } : {}),
@@ -125,9 +246,6 @@ export class PiProcessSpawner {
                 }
                 else if (event.type === "tool_execution_start") {
                     emit({ type: "progress", text: `Running child tool: ${event.toolName ?? "unknown"}` });
-                }
-                else if (event.type === "agent_end" && event.error) {
-                    emit({ type: "diagnostic", text: String(event.error) });
                 }
             };
             child.stdout?.on("data", (data) => {
@@ -137,10 +255,11 @@ export class PiProcessSpawner {
                 for (const line of lines)
                     parseLine(line);
             });
-            child.stderr?.on("data", (data) => emit({ type: "diagnostic", text: data.toString("utf8") }));
+            child.stderr?.on("data", (data) => emit({ type: "diagnostic", text: data.toString("utf8").slice(-2_000) }));
             child.once("error", (error) => {
                 if (!closed) {
                     removeAbortListener();
+                    groupCleaned = true;
                     reject(error);
                 }
             });
@@ -148,16 +267,47 @@ export class PiProcessSpawner {
                 closed = true;
                 if (buffer.trim())
                     parseLine(buffer);
-                finish({ exitCode: code ?? 1, observedExit: true });
+                // Direct child closed: sweep surviving group members, then finish
+                // once group cleanup resolves (F04: observedExit alone is not enough).
+                // groupCleaned is tri-state here: true = verified clean (or nothing
+                // to clean), false = could not confirm, undefined = verification
+                // still running and the poll below completes the promise.
+                sweepGroup();
+                const complete = () => finish({ exitCode: code ?? 1, observedExit: true, processStarted: true, groupCleaned: groupCleaned !== false });
+                if (groupCleaned !== undefined) {
+                    complete();
+                }
+                else {
+                    // Wait for the sweep's verification timers to resolve groupCleaned.
+                    const poll = (attempts) => {
+                        if (groupCleaned !== undefined) {
+                            complete();
+                            return;
+                        }
+                        if (attempts <= 0) {
+                            groupCleaned = false;
+                            complete();
+                            return;
+                        }
+                        setTimeout(poll, 50, attempts - 1);
+                    };
+                    const maxAttempts = Math.ceil((this.killGraceMs * 5) / 50) + 5;
+                    poll(maxAttempts);
+                }
             });
             if (request.signal) {
-                const onAbort = terminate;
+                const onAbort = () => {
+                    terminated = true;
+                    signalProcess("SIGTERM");
+                    killTimer = setTimeout(() => signalProcess("SIGKILL"), this.killGraceMs);
+                };
                 removeAbortListener = () => request.signal?.removeEventListener("abort", onAbort);
                 if (request.signal.aborted)
-                    terminate();
+                    onAbort();
                 else
                     request.signal.addEventListener("abort", onAbort, { once: true });
             }
         });
     }
 }
+export { groupHasSurvivors, signalGroup, supportsProcessGroups };

@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
-declare const CHILD_TOOLS: Set<string>;
+import { CHILD_TOOLS } from "./config.js";
 declare const DelegateTaskParams: Type.TObject<{
     agent: Type.TString;
     task: Type.TString;

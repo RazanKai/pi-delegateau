@@ -10,7 +10,41 @@ describe("configuration", () => {
   });
 
   it("defaults to safe normal fixed behavior and bounded limits", () => {
-    expect(parseConfig({})).toMatchObject({ selection: "fixed", mode: "normal", preference: "balanced" });
+    expect(parseConfig({})).toMatchObject({ selection: "fixed", delegationDecision: "manual", mode: "normal", preference: "balanced" });
     expect(parseConfig({}).limits.childOutputChars).toBeGreaterThan(0);
+    expect(parseConfig({}).limits.maxGatePromptChars).toBeGreaterThan(0);
+    expect(parseConfig({}).limits.maxExpectedOutputChars).toBeGreaterThan(0);
+  });
+
+  it("validates the request gate policy and preserves model profile metadata", () => {
+    expect(() => parseConfig({ delegationDecision: "unknown" })).toThrow("delegationDecision");
+    expect(parseConfig({ delegationDecision: "jev-enforce", candidates: [{ provider: "a", id: "x", contextWindow: 1000, latencyMs: 20, cost: { input: 1, output: 2 } }] })).toMatchObject({
+      delegationDecision: "jev-enforce",
+      candidates: [{ contextWindow: 1000, latencyMs: 20, cost: { input: 1, output: 2 } }],
+    });
+  });
+
+  it("rejects mutation tools re-admitted through configured parent allowlists", () => {
+    // F06/F07 class: a user allowlist may not re-admit bash/write into an
+    // enforced mode whose purpose is to withhold direct execution.
+    const widened = parseConfig({ allowedParentTools: { delegateExecution: ["delegate_task", "bash", "write"] } });
+    expect(widened.allowedParentTools.delegateExecution).not.toContain("bash");
+    expect(widened.allowedParentTools.delegateExecution).not.toContain("write");
+    expect(widened.allowedParentTools.delegateExecution).toContain("delegate_task");
+  });
+
+  it("rejects child agents with unapproved tools", () => {
+    expect(() => parseConfig({ agents: { worker: { instructions: "i", tools: ["bash", "shell"] } } })).toThrow("not approved child tools");
+    expect(() => parseConfig({ agents: { worker: { instructions: "i", tools: ["read", "delegate_task"] } } })).toThrow("delegate_task");
+  });
+
+  it("accepts an explicit child thinking level and rejects invalid ones", () => {
+    expect(parseConfig({ childThinking: "low" }).childThinking).toBe("low");
+    expect(() => parseConfig({ childThinking: "ultra" })).toThrow("childThinking");
+  });
+
+  it("keeps delegate_task in every enforced allowlist", () => {
+    expect(parseConfig({}).allowedParentTools.coordinatorOnly).toContain("delegate_task");
+    expect(parseConfig({ allowedParentTools: { delegateExecution: ["read"] } }).allowedParentTools.delegateExecution).toContain("delegate_task");
   });
 });

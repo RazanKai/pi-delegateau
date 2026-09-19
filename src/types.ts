@@ -1,6 +1,8 @@
 export type SelectionMode = "fixed" | "jev";
 export type DelegationMode = "normal" | "delegate-execution" | "coordinator-only";
+export type DelegationPolicy = "manual" | "jev-suggest" | "jev-enforce";
 export type RoutingPreference = "economy" | "balanced" | "quality";
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface ModelIdentity {
   provider: string;
@@ -79,6 +81,7 @@ export interface ChildRequest {
   instructions: string;
   tools: string[];
   cwd: string;
+  thinking?: ThinkingLevel;
   signal?: AbortSignal;
   wallTimeMs?: number;
   maxTurns?: number;
@@ -86,7 +89,7 @@ export interface ChildRequest {
 }
 
 export type ChildEvent =
-  | { type: "assistant"; text: string; model?: string; stopReason?: string; errorMessage?: string; usage?: ChildUsage }
+  | { type: "assistant"; text: string; model?: string; responseModel?: string; stopReason?: string; errorMessage?: string; usage?: ChildUsage }
   | { type: "progress"; text: string }
   | { type: "diagnostic"; text: string };
 
@@ -94,6 +97,8 @@ export interface ChildUsage {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   cost?: number;
 }
 
@@ -103,11 +108,16 @@ export interface ChildResult {
   status: ChildStatus;
   output: string;
   appliedModel: ModelIdentity;
+  requestedModel?: ModelIdentity;
+  servedModel?: ModelIdentity;
   exitCode?: number;
   usage?: ChildUsage;
   error?: string;
   diagnostics: string[];
   observedExit: boolean;
+  processStarted?: boolean;
+  groupCleaned?: boolean;
+  outputTruncated?: boolean;
 }
 
 export interface DelegateLimits {
@@ -117,10 +127,13 @@ export interface DelegateLimits {
   childOutputChars: number;
   maxTaskChars: number;
   maxContextChars: number;
+  maxExpectedOutputChars: number;
+  maxGatePromptChars: number;
 }
 
 export interface DelegateConfig {
   selection: SelectionMode;
+  delegationDecision: DelegationPolicy;
   mode: DelegationMode;
   preference: RoutingPreference;
   candidates: CandidateProfile[];
@@ -130,7 +143,10 @@ export interface DelegateConfig {
   allowExternalSensing: boolean;
   allowedParentTools: { delegateExecution: string[]; coordinatorOnly: string[] };
   limits: DelegateLimits;
+  childThinking?: ThinkingLevel;
   receiptPath?: string;
+  decisionReceiptPath?: string;
+  piCommand?: string;
 }
 
 export function modelKey(identity: ModelIdentity): string {

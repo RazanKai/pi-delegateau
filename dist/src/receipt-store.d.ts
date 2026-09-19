@@ -1,4 +1,5 @@
-import type { Receipt } from "./receipts.js";
+import type { DecisionReceipt, Receipt } from "./receipts.js";
 export declare function newDispatchId(): string;
 export declare function defaultReceiptPath(): string;
-export declare function appendReceipt(filePath: string, receipt: Receipt): Promise<void>;
+export declare function defaultDecisionReceiptPath(): string;
+export declare function appendReceipt(filePath: string, receipt: Receipt | DecisionReceipt): Promise<void>;

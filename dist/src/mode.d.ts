@@ -1,4 +1,8 @@
 import type { DelegationMode } from "./types.js";
+import { MUTATION_TOOLS } from "./config.js";
+export type RequestRestriction = "none" | "delegate" | "blocked";
+declare const DELEGATE_GATE_TOOLS: Set<string>;
+declare const RECOVERY_TOOLS: Set<string>;
 export interface ModePolicy {
     mode: DelegationMode;
     enforced: boolean;
@@ -19,9 +23,18 @@ export declare class ModeController {
     private savedTools;
     private busy;
     private overrides;
+    private requestBaseTools;
+    private requestRestriction;
     constructor(surface: ModeToolSurface);
     setAllowedTools(mode: "delegate-execution" | "coordinator-only", tools: string[]): void;
     private currentPolicy;
+    baseToolNames(): string[];
+    private effectiveTools;
+    private applyTools;
+    setRequestRestriction(restriction: RequestRestriction): void;
+    clearRequestRestriction(): void;
+    private applyModeAllowlist;
+    requestRestrictionState(): RequestRestriction | undefined;
     setBusy(busy: boolean): void;
     activate(mode: DelegationMode): {
         ok: true;
@@ -41,3 +54,4 @@ export declare class ModeController {
         reason: string;
     } | undefined;
 }
+export { DELEGATE_GATE_TOOLS, RECOVERY_TOOLS, MUTATION_TOOLS };
