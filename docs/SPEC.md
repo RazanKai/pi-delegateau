@@ -142,15 +142,20 @@ trial. Jev use requires explicit external-disclosure consent and configuration;
 missing credentials must be visible, not disguised as successful routing.
 
 `manual` leaves the local-versus-delegated decision to the parent model, as in
-basic Pi. `jev-suggest` asks Jev for one bounded `delegate` or `local`
-recommendation before the parent acts; the parent may override it. The
-recommendation and confidence are visible, and Jev failure falls back to manual
-behavior with a visible warning. `jev-enforce` uses the same decision to control
-whether direct execution tools or delegation tools are available. It fails
-closed for an execution task if Jev is unavailable, invalid, or cancelled;
-explicit user override remains available. Neither mode lets Jev invent
-subtasks, grant permissions, or choose outside the configured model/tool
-policies.
+basic Pi. `jev-suggest` makes one bounded `delegate` or `local` recommendation
+per accepted user request/run; the parent may override it without changing tools.
+A sensor error visibly returns to manual behavior. Cancellation is not a sensor
+error and never triggers fallback.
+
+`jev-enforce` adds a request-scoped restriction within the user's existing tool
+policy. `delegate` blocks direct commands/mutation while retaining eligible
+delegation and permitted coordination. `local` adds no restriction and does not
+require a child; it never restores tools forbidden by the base mode. Sensor
+failure blocks protected execution, not conversation, status, clarification or
+explicit user override. Neither policy lets Jev create subtasks or grant authority.
+
+Implement advisory routing first. Enforced routing is a later milestone, gated on
+live evidence for the existing chooser/child path and the advisory decision path.
 
 ## 4. Requirements
 
@@ -257,29 +262,111 @@ Never require a minimum number of child invocations. Conceptual answers need no
 ceremonial delegation. This is a tool-execution boundary, not proof of good task
 decomposition or a sandbox against hostile installed code.
 
-### R11 — Optional Jev delegation decision
+### R11 — Optional request-scoped Jev delegation decision
 
-Support an explicit decision policy separate from child-model selection:
+#### Decision lifetime and input
 
-- `manual`: do not call Jev; the parent decides whether to use `delegate_task`.
-- `jev-suggest`: ask one bounded Jev Choice for `delegate` or `local` before the
-  parent acts. Show the recommendation and confidence to the parent, but permit
-  the parent to override it. A Jev failure visibly returns control to the manual
-  path.
-- `jev-enforce`: use the same decision to select the parent tool surface. A
-  `delegate` result blocks direct execution tools and leaves delegation available;
-  a `local` result leaves direct execution available and does not require a
-  child. An unavailable, invalid, or cancelled decision fails closed for an
-  execution task rather than silently becoming manual. A user override must be
-  explicit and visible.
+Make at most one semantic delegation judgment per accepted user request/run, not
+per tool call, child return, or child dispatch. Hold the applied decision stable
+through that run's continuation and child returns. Give the request a decision ID
+and generation before sensing. Completion, cancellation, session replacement or
+a material user steering instruction invalidates it. A new accepted task or
+material steering instruction starts a new generation at a safe, awaited
+boundary before further execution. Old responses cannot affect the new generation.
+Treat accepted steering that changes work as material by default; do not add a
+second classifier to decide whether to invalidate. Status/coordination commands
+do not themselves create new work generations.
 
-The gate receives the current task and bounded policy/context data, not the full
-parent transcript or repository contents. It cannot create subtasks, select
-permissions, override mode allowlists, or choose a child model. The child-model
-selection remains a separate decision after the parent calls `delegate_task`.
-Cancellation never falls back to either recommendation. Record whether the
-recommendation was accepted or overridden, its latency, and its safe outcome in
-the receipt without storing the task body or raw service response.
+The decision compares parent execution with the available delegated alternative:
+
+> Given this parent, the eligible child capabilities, the assignment's context
+> requirements, and the user's policy, which permitted execution path is
+> preferable after accounting for handoff cost?
+
+Supply bounded state: the task; parent model/profile and permitted capabilities;
+a compact eligible-child capability/profile summary; the availability of a usable
+child; relevant context already available to the parent as a bounded summary or
+explicit indicator; expected output, context-transfer/isolation considerations;
+and user routing preference. Mark unknown information as unknown. Do not mistake
+task difficulty for delegation value or assume an isolated child has the parent's
+context. Parent-supplied context summaries are evidence of limited reliability,
+not permission grants. Do not read repository files for the gate or transmit the
+full parent transcript. Do not create a memory summarization subsystem for this.
+
+Code performs availability and permission checks first. If the base policy already
+requires delegation for execution, skip the redundant judgment and record a
+policy-determined outcome. If no usable child exists, recommend local only when
+the base policy permits it; otherwise report a blocked execution path. Do not let
+Jev select an impossible path. Availability does not guarantee provider uptime;
+child eligibility is still revalidated at launch.
+
+#### Decision policies
+
+- `manual`: no delegation-gate request; the parent decides whether to delegate.
+  Independently configured child-model selection may still call Jev.
+- `jev-suggest`: display the recommendation and confidence as request-scoped
+  context, without changing tools or past conversation. The parent may disagree.
+  Timeout, invalid response or sensor failure visibly falls back to manual.
+  Cancellation ends the decision and does not resume manual execution by fallback.
+- `jev-enforce`: apply a request-scoped restriction before execution. `delegate`
+  blocks direct commands/mutation; delegation, approved reads and coordination
+  remain only where the base policy allows them. `local` adds no restriction:
+  parent execution remains possible only to the extent already authorized, and
+  delegation remains optional. This is not a prohibition on later delegation.
+
+All sensing has bounded input and a total deadline. External-disclosure policy
+applies before either Jev decision. If sensing is prohibited, advisory mode has a
+visible manual outcome; enforce mode stays blocked unless code can determine a
+permitted outcome from hard policy or the user explicitly overrides it. Never
+send data merely to discover whether disclosure is allowed.
+
+#### Policy composition and failure behavior
+
+Compute one effective policy for model-visible tools and the call-time guard:
+
+`effective tools = user/base-mode allowlist intersect request-gate allowance`
+
+The gate may remove capabilities, never add them. In delegate-execution mode a
+local decision cannot restore bash/edit/write; in coordinator-only mode it cannot
+restore repository tools. Represent the user mode and request decision separately;
+do not implement the gate by toggling or replacing the user's mode. Preserve
+R06's explicit user-only mode transitions and restoration semantics.
+
+While an enforced decision is pending or failed, block direct execution/mutation
+and child launch. Keep permitted conversation, clarification, status and explicit
+user recovery available. Do not introduce another semantic 'execution task'
+classifier: the fail-closed boundary is defined by tool capability. There is no
+requirement to delegate a purely conversational answer.
+
+An explicit user override chooses local, delegate, or manual behavior for the
+current request only, remains within the base policy, and is visible. Restoring
+otherwise forbidden tools requires a separate explicit base-mode change. Apply
+overrides at a safe boundary; cancel pending sensing and invalidate its response
+generation. An override never lets a late response reinstate the old restriction.
+Cancelling the request cannot be used as an implicit override.
+
+Before another request starts, expire the old decision and recompute from base
+policy; restrictions must not leak between requests. Tool/prompt changes occur
+only at explicit request, steering or user-override boundaries, not on every turn.
+An event notification
+alone is not sufficient: verify the chosen hook is awaited before the next model
+request/tool execution. Do not rewrite past messages or a changing system plan.
+
+#### Outcomes and child separation
+
+Record recommendation, source (manual, policy-determined, Jev, fallback or user
+override), effective restriction and observed outcome. An explicit user override
+and a parent choosing differently in advisory mode are distinct events. Only
+claim observed agreement/disagreement when an execution path supplies evidence;
+clarification, no execution and cancellation are separate outcomes, not assumed
+overrides. Mixed local/delegated execution is representable because local does
+not prohibit delegation.
+
+The gate has no dispatch admission lease. Existing R02 admission begins when
+`delegate_task` is invoked; the gate must not consume the child lease for a local
+run. The child model is selected independently after that invocation. Each child
+receipt links to its parent decision ID when one exists, and one request can have
+multiple sequential dispatches without rerunning the gate.
 
 ### R07 — Child execution and truthful result contract
 
@@ -335,10 +422,19 @@ Keep local structured selection/completion records linked by dispatch ID:
 
 - eligible IDs and profile/config versions;
 - selected/applied identity and source;
-- delegation-decision policy, recommendation, effective action, and override state;
+- parent decision ID when associated with a request-scoped gate;
+- delegation-decision policy, recommendation, effective restriction, and override state;
 - bounded selection probabilities/confidence when present;
 - delegation-decision latency, model-chooser latency, available chooser/child usage,
   outcome and error category.
+
+Create request-decision records independently of child-dispatch receipts. Local
+execution, a blocked request, clarification-only completion and cancellation still
+have a decision record even if no child exists. Record request generation, policy
+source, base mode, invalidation/override reason and observed outcome, including
+no-execution or mixed execution. Decision IDs and dispatch IDs are distinct; link
+rather than fabricate a dispatch for local work. Include delegation-gate usage
+when available as well as latency in total resource accounting.
 
 Exclude raw prompts, task bodies, repository contents, and secrets from default
 receipts. Do not store raw service error bodies without sanitization. Child output
@@ -357,7 +453,12 @@ Run a live Jev-to-child smoke test and a paired fixed-versus-Jev pilot under the
 same delegation mode. Include sensing overhead, failures, quality checks, total
 latency, and available usage/cost. Evaluate delegation-mode changes separately.
 For the Jev delegation gate, test manual, advisory, enforced, override, failure,
-and cancellation behavior through the real parent turn path.
+and cancellation through the real parent run path. Include mode composition,
+request expiry/steering, local-only receipts and delayed-handler ordering. Before
+building enforcement, complete live chooser-to-child and verified delegated-task
+checks (T05/T11), cancellation/admission prerequisites, and the advisory-path live
+check. Compare gate policies with child selection held constant; count parent,
+child, delegation-gate and model-chooser costs/usage where available.
 Do not claim savings, compatibility, or completion from mock fixtures. A provider
 or credential blocker leaves live acceptance incomplete, not silently waived.
 
@@ -373,14 +474,21 @@ Use a handful of modules with real consumers, not a scheduler framework:
 - Child runner: explicit launch, event normalization, limits, cancellation/cleanup.
 - Receipts: local safe metadata and UI reporting.
 
-Conceptual lifecycle:
+Separate lifecycles:
 
-`idle -> deciding? -> selecting -> running -> cleaning-up -> idle`
+- Parent request: `accepted -> deciding/policy resolution -> local and/or delegated
+  execution -> settled`. Failure can enter a blocked state with explicit recovery.
+  Cancellation or material steering invalidates the request generation. No child
+  is necessary for this lifecycle or its receipt to complete.
+- Child dispatch: `admitted -> selecting -> running -> cleaning-up -> idle`.
+  Errors and cancellation enter cleanup. Fixed/pinned paths skip model sensing,
+  not eligibility. A busy response acquires no lease. Child model selection is
+  not revisited after launch.
 
-Manual dispatches skip the delegation-decision step; fixed and pinned dispatches
-skip model sensing. Neither skips eligibility. Errors and cancellation enter
-cleanup. A busy response starts no lifecycle of its own. Model selection is not
-revisited once a child starts.
+One effective-policy resolver combines stable user mode with the request gate for
+both tool presentation and actual guards. Manual policy makes no delegation-gate
+call, but Jev child-model selection can still occur. Keep admission, request
+cancellation and child cleanup distinct rather than overloading one state machine.
 
 ## 6. Acceptance contracts
 
@@ -398,7 +506,11 @@ revisited once a child starts.
 | T10 | No sensing under disclosure prohibition; default receipts omit private payloads and secrets | R09 |
 | T11 | Verified delegated task works in a non-git workspace without plans, gates, validator or remediation | R01, R07, R10 |
 | T12 | Paired fixed/Jev pilot reports quality and total overhead honestly, with failures and unknown costs | R09, R10 |
-| T13 | Optional Jev delegation decision supports manual, suggestion, enforcement, override, failure, and cancellation without bypassing tool policy | R06, R10, R11 |
+| T13 | Manual/advisory gate uses bounded comparative state; live recommendation reaches the parent, permits disagreement, and distinguishes sensor failure from cancellation | R10, R11 |
+| T14 | Enforced gate intersects base policy, skips policy-determined decisions, handles unavailable paths, and never grants tools or bypasses disclosure restrictions | R06, R09, R11 |
+| T15 | One judgment per request generation; awaited ordering, steering/expiry, override and late responses cannot leak policy across runs or reclassify child returns | R06, R08, R11 |
+| T16 | Gate failure blocks protected execution but preserves user recovery; overrides are visible, request-scoped and cannot widen base permissions | R06, R08, R11 |
+| T17 | Local-only, blocked, no-execution, cancelled and mixed outcomes have independent decision receipts; child dispatches link without claiming unobserved agreement | R09, R11 |
 
 ## 7. Authoritative integration references
 

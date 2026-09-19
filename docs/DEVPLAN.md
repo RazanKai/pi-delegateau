@@ -109,63 +109,40 @@ Exit evidence:
 **Acceptance targets:** T02, T03, T04, T08, T11; child/lifecycle portions of T09 and
 receipt portions of T10. Keep cross-milestone contracts PARTIAL until complete.
 
-## M2 — Jev decides delegation and chooses the child model
+## M2 — Jev chooses the child model (existing feature)
 
-**Goal:** add bounded semantic decisions to the working parent/child launch path.
+**Goal:** complete and verify launch-time model selection without folding the new
+parent delegation gate into an already implemented feature milestone.
 
 Work:
 
-1. Define the explicit delegation-decision policy: `manual`, `jev-suggest`, and
-   `jev-enforce`. Keep manual behavior as the default and preserve a visible
-   user override.
-2. Verify the real Pi pre-turn/active-tool seam needed to make one delegation
-   decision for an incoming task without rebuilding past conversation context.
-   If the seam cannot safely support this, report the blocker instead of hiding
-   the decision in prompt advice.
-3. Build one bounded Choice over `delegate` and `local` from the actual task and
-   bounded policy/context data. Do not send the full parent transcript or read
-   repository contents. Do not let the choice grant tools, create subtasks, or
-   select the child model.
-4. In suggest mode, expose the recommendation, confidence, latency, and visible
-   fallback to manual behavior. In enforce mode, select the parent tool surface,
-   fail closed on unavailable/invalid/cancelled decisions, and support explicit
-   user override.
-5. Build one separate Choice over eligible child candidates after the parent
-   actually delegates. Keep delegation decision and child-model selection
-   independently testable and independently receipted.
-6. Bound input and the total decision deadline; validate the decision and apply
-   cancellation/late-response rules before changing tools or launching work.
-7. Revalidate child-model eligibility just before launch. Handle eligible default
-   fallback for model-sensor failure only, never for cancellation.
-8. Apply explicit consent for external sensing. Expose missing/misconfigured Jev
-   distinctly from successful selection and from a visible runtime fallback.
-9. Record decision source, recommendation/override, candidate/profile versions,
-   probabilities/confidence, sensing usage/latency, and applied identity without
-   raw service error leakage.
+1. Maintain compact candidate profiles with exact IDs, provenance, capabilities
+   and known/unknown cost information.
+2. Build one bounded Choice over eligible child candidates from the resolved
+   assignment. Keep trusted policy distinct from untrusted task/context data.
+3. Skip child-model sensing for pins, fixed mode, a single eligible candidate or
+   prohibited disclosure. Reject empty eligibility before launch.
+4. Enforce the total selection deadline, response validation and eligible-default
+   fallback for sensor failure only. Cancellation never invokes fallback.
+5. Revalidate eligibility immediately before launch; reject late sensor results
+   after cancellation and preserve admission/cleanup behavior.
+6. Show missing credentials and actual fallback distinctly from working Jev
+   selection. Record safe metadata, sensing overhead and applied identity.
 
 Exit evidence:
 
-- Manual mode makes no delegation-decision Jev request; parent behavior remains
-  unchanged.
-- Suggest mode shows a recommendation and permits an override without changing
-  the parent's tools; Jev failure visibly returns to manual behavior.
-- Enforce mode changes the real parent tool surface, blocks direct execution on
-  `delegate`, preserves delegation, fails closed on decision failure, and honors
-  an explicit user override.
-- A live Jev response goes through the registered delegation tool to an actual Pi
+- A live Jev model Choice goes through the registered delegation tool to a real
   child request with matching applied provider/model.
-- Controlled HTTP responses test invalid IDs, malformed output, timeout, service
-  error, changed eligibility, and ineligible fallback. Use the real client and
-  extension path; isolate only the remote service when making cases deterministic.
-- Pin/fixed/single-candidate/disclosure-prohibited paths produce no Jev request.
-- Cancellation during sensing cannot fall back, launch late, or leak the admission
-  lock after cleanup. Child model remains fixed once execution starts.
-- Logging probes use sensitive sentinel values to demonstrate receipts exclude
-  task bodies, prompts, credential values and unfiltered error bodies.
+- Controlled HTTP/entry-path cases cover invalid IDs, malformed output, timeout,
+  service error, eligibility changes, invalid default and cancellation.
+- Pin/fixed/single-candidate paths make no child-model-selection request. They do
+  not preclude a separately configured delegation-gate request in M5/M6.
+  Disclosure-prohibited paths make neither kind of external sensing request.
+- No late launch, admission leak, parent-model change or child-model switch occurs.
+- Default receipts omit private payload and secret sentinels, including error paths.
 
-**Acceptance targets:** T05, T06, T13; complete T04, T09 and T10 as their full
-matrix passes. Credentials/network blockers leave the live T05/T13 criteria
-incomplete.
+**Acceptance targets:** T05, T06; complete existing T04, T09 and T10 matrices.
+Live evidence remains required. New delegation decisions belong to M5/M6, not M2.
 
 ## M3 — Optional delegation enforcement
 
@@ -183,8 +160,8 @@ Work:
    the captured tool selection when some tools no longer exist.
 5. Keep child tool policy independent. No spawn quotas, hidden per-turn classifier,
    plan injection, automatic verifier, or fallback to unrestricted parent execution.
-   The only classifier-like behavior is the explicit, configured Jev delegation
-   decision covered by M2/R11.
+   The later request-scoped gate in M5/M6/R11 is a separate policy layer. Preserve
+   this user mode as the base allowlist; never toggle modes to apply a Jev result.
 6. Refuse unsupported enforced modes rather than silently downgrading to guidance.
 
 Exit evidence:
@@ -233,7 +210,115 @@ Exit evidence:
 - Recommend keeping the selector, changing profiles, or using fixed selection on
   observed evidence. Savings are a hypothesis, not a release checkbox.
 
-**Acceptance target:** T12, followed by a full acceptance review.
+**Acceptance target:** T12, followed by a review of the original T01–T12 scope.
+New gate milestones and their contracts are evaluated separately below.
+
+## M5 — Request-scoped advisory delegation gate (new feature)
+
+**Goal:** test whether comparative delegation advice is useful before enforcing it.
+
+Prerequisite: complete the live chooser-to-child and verified delegated-task
+checks T05/T11 before implementing the new gate. Resolve the admission and
+cancellation defects discovered by those runs rather than building over them.
+M0–M4 implementation/evidence is not reset by this extension to the plan.
+
+Work:
+
+1. Verify a real awaited Pi request/steering boundary. Record precisely what
+   constitutes an accepted request, material steering and settlement. Do not use
+   a fire-and-forget subscriber as a barrier or reclassify each turn/tool call.
+2. Add manual and advisory policies only, defaulting to manual. Allocate a request
+   decision ID/generation independently of child dispatch admission.
+3. Build bounded comparative state: task, parent model/capabilities, usable child
+   alternatives, relevant parent-context indicator/summary, handoff/isolation
+   considerations and preference. Mark unknowns; do not introduce repository
+   scraping, full-transcript sensing or another summarizer/classifier.
+4. Resolve hard availability/mode constraints in code before sensing. Skip
+   redundant policy-determined decisions; never recommend an unavailable path.
+5. Show one advisory Choice result as current request context without changing
+   tools, rewriting history or rebuilding a changing system prompt. Hold it
+   across child returns and ordinary continuation.
+6. On sensor failure visibly resume manual behavior; cancellation instead ends
+   the decision. Expire decisions on settlement/session replacement or material
+   steering. Late responses must be generation-checked.
+7. Add independent decision receipts for local, delegated, mixed, blocked,
+   cancelled and no-execution outcomes. Link child IDs; distinguish parent
+   disagreement, explicit user override and unobserved/no-execution outcomes.
+8. Compare manual versus advisory runs with child-model selection held constant;
+   include parent, child, gate and chooser overhead. Keep this a small pilot, not
+   a new evaluation service.
+
+Exit evidence:
+
+- Live Jev advice reaches a real parent run; the parent can accept or disagree
+  without changing its tools. Manual mode makes no delegation-gate request.
+- A delayed-handler probe proves the next operation waits for decision/timeout;
+  property changes alone do not prove ordering.
+- Repeated tool calls and multiple sequential child dispatches under one request
+  do not trigger another delegation judgment or consume an extra child lease.
+- Material steering/new requests invalidate old answers, child returns do not,
+  and settling a request does not leak decision state into the next run.
+- Timeout/invalid response visibly returns to manual; cancellation or override
+  cannot produce fallback execution or a stale recommendation.
+- Local-only, clarification-only and cancelled runs create safe decision records
+  without fake dispatch IDs. Child records link to their request decision.
+- Comparative state, disclosure prohibition and receipt redaction are exercised
+  through the real entry path, not only pure selector calls.
+
+**Acceptance targets:** T13; advisory portions of T15/T17. New contracts remain
+PARTIAL until enforced-path clauses are also proven. Report advisory usefulness
+separately from model-choice quality; do not automatically proceed on a poor pilot.
+
+## M6 — Request-scoped enforcement and user recovery (new feature)
+
+**Goal:** apply the proven gate as a restriction, never as a permission grant.
+
+Prerequisites: T05/T11 live checks, M5 live advisory check, and verified existing
+T03/T07/T09 admission, tool-guard and cancellation/shutdown contracts. Resolve
+missing evidence explicitly; no promotion to enforcement on green mocks alone.
+
+Work:
+
+1. Add `jev-enforce` as a separate request policy. Build one effective-policy
+   resolver from base-mode permission intersected with gate allowance. Use it
+   for both active tool presentation and the actual tool-call guard.
+2. Keep the user's mode stable. `local` adds no authority or delegation ban;
+   `delegate` removes direct execution. Policy-determined delegation skips Jev.
+3. Define pending/failed behavior by tool capabilities: block protected execution
+   and child launch but retain permitted conversation, status and recovery. Do
+   not ask another model whether this is an 'execution task'.
+4. Support visible current-request local/delegate/manual overrides within the
+   base policy. Override cancels sensing and invalidates its generation at a safe
+   boundary; forbidden capabilities need an explicit base-mode change instead.
+5. Test disclosure-disabled behavior, unavailable children, expired decisions,
+   late service responses and session replacement. Do not silently become manual
+   in enforce mode or carry a failed restriction into a later request.
+6. Extend request receipts with effective restriction, policy resolution and
+   explicit override events. Preserve no-execution and mixed outcomes honestly.
+7. Run manual/advisory/enforced comparisons with child selection held constant.
+   Count all inference overhead and verify actual outputs; record failures and
+   any evidence that enforcement worsens quality or latency.
+
+Exit evidence:
+
+- Cross the three base modes with local/delegate outcomes and sensor failure;
+  effective tools are always a subset of base permission, including dynamic tools.
+- Enforced delegate blocks actual direct execution while allowed child launch
+  works; local never restores bash/edit/read forbidden by the base mode.
+- Missing child availability and policy-forced delegation are handled without a
+  pointless Jev request or an impossible allowed path.
+- Decision failure preserves status/clarification/user recovery but permits no
+  protected execution. Cancellation never doubles as a manual override.
+- Override-before-response and steering-before-response races leave the newer
+  policy intact. Override expires with its request and cannot widen base tools.
+- Delayed decision, multiple child returns, settlement, session change and next
+  request tests prove both awaited ordering and no stale restriction leakage.
+- Real parent-run traces verify decision receipts for blocked/local/mixed/no-op
+  outcomes, linked child dispatches and total gate/chooser usage when available.
+
+**Acceptance targets:** T14, T16; complete T15/T17 and rerun T07/T09/T10.
+Full release review covers T01–T17; original evidence remains valid only where the
+new policy path has not changed the behavior it established.
 
 ## Acceptance coverage — authoritative status
 
@@ -255,7 +340,11 @@ or artifact references when updating. Milestone ownership is not evidence.
 | T10 | R09 | M1, M2 | PARTIAL | `tests/receipts.test.ts` proves payload omission and secret sanitization; receipts are JSONL and Jev is skipped when prohibited. Full entry-path disclosure probes remain. |
 | T11 | R01, R07, R10 | M1, M3 | TODO | No real delegated task has been run in a disposable non-git workspace yet. |
 | T12 | R09, R10 | M4 | TODO | No fixed-versus-Jev pilot has been run. |
-| T13 | R06, R10, R11 | M2, M3 | TODO | Delegation gate is specified but not implemented; no Pi pre-turn decision path or manual/suggest/enforce E2E exists. |
+| T13 | R10, R11 | M5 | TODO | New advisory gate and comparative state are specified; no implementation or live parent-path evidence. |
+| T14 | R06, R09, R11 | M6 | TODO | Effective-policy intersection, deterministic bypass and unavailable-path checks are not implemented. |
+| T15 | R06, R08, R11 | M5, M6 | TODO | Request generations, awaited ordering, expiry/steering and late-response isolation are not implemented. |
+| T16 | R06, R08, R11 | M6 | TODO | Enforced failure/recovery and request-scoped, permission-preserving user overrides are not implemented. |
+| T17 | R09, R11 | M5, M6 | TODO | Independent request receipts and child links, including no-execution/mixed outcomes, are not implemented. |
 
 ## Minimum failure matrix
 
@@ -265,8 +354,16 @@ where appropriate:
 - Invalid configuration, unavailable credentials, missing or ineligible pin.
 - Empty/one/multiple candidate sets, unknown profile metadata, default unavailable.
 - Sensor disabled, remote error, invalid selected ID, slow response, late response.
-- Delegation gate manual/suggest/enforce, accepted recommendation, override,
-  unavailable service, invalid action, cancellation, and late response.
+- Delegation gate manual/suggest/enforce, bounded parent-versus-child state,
+  unavailable child alternatives, policy-determined bypass and unknown metadata.
+- All base-mode/local/delegate/failure combinations; no permission widening,
+  disclosure-prohibited sensing, or alternate/dynamic-tool bypass.
+- Multiple tool calls/child returns within one request; new request, material
+  steering, settlement and session replacement invalidate the correct generation.
+- Delayed awaited decision, cancellation/override before response, sensor failure,
+  visible manual advisory fallback and protected enforced failure with recovery.
+- Independent local/blocked/clarification/cancelled/mixed receipts, correct child
+  linkage and no false acceptance/override labels for unobserved behavior.
 - Concurrent dispatch attempts and failure during each lifecycle stage.
 - Child spawn error, provider error despite zero exit, signal exit, hanging child,
   descendant process, wall-time/turn limit, cleanup failure and session shutdown.
