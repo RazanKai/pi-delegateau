@@ -126,10 +126,9 @@ Optional fields:
 
 ## Safety and receipts
 
-- If the Pi host exposes `isProjectTrusted()` and reports the project as
-  untrusted, delegation is refused before configuration is read or a child is
-  spawned. Basic Pi installations that do not expose this hook provide no
-  project-trust decision, so this check is skipped.
+- Pi's core project-trust state is checked through `ctx.isProjectTrusted()` before
+  configuration is read or a child is spawned. Project trust controls loading
+  project-local Pi resources; it is not a sandbox.
 - Jev-enforced failures fail closed instead of silently running locally.
 - Candidate eligibility is filtered again immediately before launch.
 - Provider-served model substitutions are disclosed in the tool result.
