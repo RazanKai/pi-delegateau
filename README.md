@@ -149,14 +149,6 @@ Useful control commands inside Pi:
 - `/delegateau enable coordinator-only`
 - `/delegateau disable`
 
-## Documentation
-
-- [Specification](docs/SPEC.md)
-- [Development plan](docs/DEVPLAN.md)
-- [Work log and verification receipts](docs/WORKLOG.md)
-- [Attribution notice](NOTICE.md)
-- [Third-party license](THIRD_PARTY_LICENSES/pi-foreman-MIT.txt)
-
 This project is independently implemented and does not require `pi-foreman` at
 runtime. See `NOTICE.md` for the ideas and license attribution used during
 implementation.
