@@ -40,8 +40,11 @@ A fresh project can build its initial pool with:
 
 Setup reads Pi's live model registry, keeps models with configured credentials,
 preserves provider metadata, and requires confirmation before writing
-`.pi/delegateau.json`. Reachability probing is sequential and explicit; quota
-measurement and external benchmark retrieval are separate opt-in stages.
+`.pi/delegateau.json`. For Ollama Cloud, `pi-ollama-cloud-link` supplies that
+catalog and the provider-owned quota snapshot; catalog presence confirms that the
+model is listed, not that a generation request will succeed. Reachability probing
+is sequential and explicit; quota measurement and external benchmark retrieval
+are separate opt-in stages.
 
 The built-in role templates are:
 
@@ -61,6 +64,9 @@ is recorded in the generated child configuration.
 - Pi coding agent `0.85.1` (the tested compatibility target)
 - A `pi` executable on `PATH` when a child assignment is launched
 - TypeSafe credentials for Jev decisions
+- `pi-ollama-cloud-link` when using Ollama Cloud; it registers the `ollama-cloud`
+  provider, supplies Pi's live model catalog, and publishes the usage snapshot
+  delegateau reads for quota headroom. It is not needed for other providers.
 
 ## Development
 
