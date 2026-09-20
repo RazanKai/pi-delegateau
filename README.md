@@ -23,11 +23,6 @@ For each request, the extension keeps two decisions distinct:
    `childThinking`; provider exhaustion, reachability failures, and cancellation
    are enforced before launch.
 
-This is not a replacement for a model-only router. If the desired behavior is
-only “pick a model for this task,” use a model router such as Switchyard. Use
-pi-delegateau when the system must decide whether another Pi process should exist
-at all, then route that child deliberately.
-
 The child receives its own session, selected model, trusted role instructions,
 explicit tools, and bounded task context. It does not receive the parent
 conversation or system prompt. Dispatch is bounded by a parallel slot pool and
@@ -131,7 +126,10 @@ Optional fields:
 
 ## Safety and receipts
 
-- Untrusted projects are refused before a child command is spawned.
+- If the Pi host exposes `isProjectTrusted()` and reports the project as
+  untrusted, delegation is refused before configuration is read or a child is
+  spawned. Basic Pi installations that do not expose this hook provide no
+  project-trust decision, so this check is skipped.
 - Jev-enforced failures fail closed instead of silently running locally.
 - Candidate eligibility is filtered again immediately before launch.
 - Provider-served model substitutions are disclosed in the tool result.
