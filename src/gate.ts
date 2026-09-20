@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { choice, TypeSafeClient } from "@typesafe-ai/sdk";
+import { choice } from "@typesafe-ai/sdk";
+import { sharedJevClient, type JevClientLike } from "./jev-client.js";
 import type {
   CandidateProfile,
   ComplexityLevel,
@@ -383,9 +384,8 @@ export class DelegationGate {
   }
 }
 
-export interface JevDelegationClientLike {
-  systemOne(request: unknown, options?: { signal?: AbortSignal; timeout?: number; retry?: { maxRetries: number } }): Promise<any>;
-}
+/** Same transport shape as the model chooser's, so one cache serves both. */
+export type JevDelegationClientLike = JevClientLike;
 
 export class JevDelegationSelector implements DelegationChoiceRuntime {
   private readonly client: JevDelegationClientLike | undefined;
@@ -403,14 +403,10 @@ export class JevDelegationSelector implements DelegationChoiceRuntime {
       this.client = options.client;
       return;
     }
-    try {
-      this.client = new TypeSafeClient({ timeout: this.timeoutMs, retry: { maxRetries: 0 } });
-    } catch {
-      // Missing credentials or unusable transport: leave the client unset.
-      // choose() then throws a typed error inside the gate's race, where the
-      // gate's own fail-closed/fallback logic handles it.
-      this.client = undefined;
-    }
+    // Missing credentials or unusable transport leaves the client unset;
+    // choose() then throws inside the gate's race, where the gate's own
+    // fail-closed/fallback logic handles it.
+    this.client = sharedJevClient(this.timeoutMs);
   }
 
   async choose(input: DelegationChoiceInput): Promise<DelegationChoiceAnswer> {

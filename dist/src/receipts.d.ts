@@ -28,7 +28,18 @@ export interface ReceiptInput {
     groupCleaned?: boolean;
     outputTruncated?: boolean;
 }
-export type ReceiptErrorCategory = "credential-missing" | "timeout" | "invalid-response" | "cancelled" | "sensing-prohibited" | "sensor-error";
+export type ReceiptErrorCategory = "credential-missing" | "timeout" | "invalid-response" | "cancelled" | "sensing-prohibited" | "budget" | "quota" | "connection" | "sensor-error";
+/**
+ * A failure that already knows which category it is. Thrown by transport
+ * adapters that have the structure in hand, so classification does not have to
+ * recover it from prose. `code` is deliberately the same vocabulary as
+ * `ReceiptErrorCategory` so receipts need no translation.
+ */
+export declare class ReceiptError extends Error {
+    readonly code: ReceiptErrorCategory;
+    readonly status?: number | undefined;
+    constructor(code: ReceiptErrorCategory, message: string, status?: number);
+}
 export type Receipt = Omit<ReceiptInput, "task" | "expectedOutput" | "context" | "fallbackCause"> & {
     fallbackCause?: ReceiptErrorCategory;
 };
@@ -60,6 +71,18 @@ export type DecisionReceipt = Omit<DecisionReceiptInput, "reason" | "invalidatio
 export declare function classifyError(message: string): ReceiptErrorCategory;
 export declare function classifyError(message: undefined): undefined;
 export declare function classifyError(message: string | undefined): ReceiptErrorCategory | undefined;
+/**
+ * Categorize a failure from whatever it is, preferring structure over text.
+ *
+ * A transport error usually knows exactly what went wrong: the SDK's errors
+ * carry an HTTP status (`APIError.status`), a timeout carries its own class,
+ * and an abort carries `AbortError`. Reading those is exact; reading the
+ * message is a guess. The order below is therefore specificity first, prose
+ * last — which is what makes a local deadline, a provider timeout and a
+ * refused credential distinguishable at all, since all three are spelled
+ * "timeout" or "authentication" in a sentence.
+ */
+export declare function classifyFailure(error: unknown): ReceiptErrorCategory | undefined;
 export declare function buildDecisionReceipt(decision: DelegationDecision, outcome: string): DecisionReceipt;
 /**
  * Sanitize an error message for display. NOTE: this is for transient UI text

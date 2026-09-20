@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { choice, TypeSafeClient } from "@typesafe-ai/sdk";
+import { choice } from "@typesafe-ai/sdk";
+import { sharedJevClient } from "./jev-client.js";
 import { COMPLEXITY_EFFORT, COMPLEXITY_LEVELS } from "./types.js";
 import { describeCandidateProviderQuota } from "./quota.js";
 import { isComplexityLevel } from "./live-data.js";
@@ -291,15 +292,10 @@ export class JevDelegationSelector {
             this.client = options.client;
             return;
         }
-        try {
-            this.client = new TypeSafeClient({ timeout: this.timeoutMs, retry: { maxRetries: 0 } });
-        }
-        catch {
-            // Missing credentials or unusable transport: leave the client unset.
-            // choose() then throws a typed error inside the gate's race, where the
-            // gate's own fail-closed/fallback logic handles it.
-            this.client = undefined;
-        }
+        // Missing credentials or unusable transport leaves the client unset;
+        // choose() then throws inside the gate's race, where the gate's own
+        // fail-closed/fallback logic handles it.
+        this.client = sharedJevClient(this.timeoutMs);
     }
     async choose(input) {
         if (!this.client)

@@ -1,3 +1,4 @@
+import { type JevClientLike } from "./jev-client.js";
 import type { CandidateProfile, ComplexityLevel, DelegationMode, DelegationPolicy, RepositoryProfile, RoutingPreference } from "./types.js";
 import { type QuotaState } from "./quota.js";
 export type GateRecommendation = "local" | "delegate";
@@ -99,15 +100,8 @@ export declare class DelegationGate {
     invalidate(reason: string): DelegationDecision | undefined;
     settle(): DelegationDecision | undefined;
 }
-export interface JevDelegationClientLike {
-    systemOne(request: unknown, options?: {
-        signal?: AbortSignal;
-        timeout?: number;
-        retry?: {
-            maxRetries: number;
-        };
-    }): Promise<any>;
-}
+/** Same transport shape as the model chooser's, so one cache serves both. */
+export type JevDelegationClientLike = JevClientLike;
 export declare class JevDelegationSelector implements DelegationChoiceRuntime {
     private readonly client;
     private readonly timeoutMs;

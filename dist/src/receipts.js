@@ -1,10 +1,29 @@
 import { modelKey } from "./types.js";
+/**
+ * A failure that already knows which category it is. Thrown by transport
+ * adapters that have the structure in hand, so classification does not have to
+ * recover it from prose. `code` is deliberately the same vocabulary as
+ * `ReceiptErrorCategory` so receipts need no translation.
+ */
+export class ReceiptError extends Error {
+    code;
+    status;
+    constructor(code, message, status) {
+        super(message);
+        this.name = "ReceiptError";
+        this.code = code;
+        if (status !== undefined)
+            this.status = status;
+    }
+}
 // Error classification persisted instead of raw remote text. Gate/chooser
 // failures are categorized; the raw service message never reaches receipts
 // because it can echo private prompt content (F08).
 const ERROR_CATEGORIES = [
     [/no api key|api key|credentials|credential|auth/i, "credential-missing"],
     [/deadline|timeout|timed?\s*out/i, "timeout"],
+    [/budget|request limit/i, "budget"],
+    [/socket|network|connect|fetch failed/i, "connection"],
     [/invalid|malformed|no valid|unexpected|must be/i, "invalid-response"],
     [/cancel/i, "cancelled"],
     [/prohibited/i, "sensing-prohibited"],
@@ -17,6 +36,58 @@ export function classifyError(message) {
             return category;
     }
     return "sensor-error";
+}
+/** The HTTP statuses whose meaning is unambiguous, whatever the message says. */
+function categorizeStatus(status) {
+    if (status === 401)
+        return "credential-missing";
+    if (status === 403)
+        return "sensing-prohibited";
+    if (status === 429)
+        return "quota";
+    if (status === 400 || status === 404 || status === 422)
+        return "invalid-response";
+    // A 5xx is the provider failing to handle a request we cannot see a fault in.
+    if (status >= 500)
+        return "sensor-error";
+    return undefined;
+}
+/**
+ * Categorize a failure from whatever it is, preferring structure over text.
+ *
+ * A transport error usually knows exactly what went wrong: the SDK's errors
+ * carry an HTTP status (`APIError.status`), a timeout carries its own class,
+ * and an abort carries `AbortError`. Reading those is exact; reading the
+ * message is a guess. The order below is therefore specificity first, prose
+ * last — which is what makes a local deadline, a provider timeout and a
+ * refused credential distinguishable at all, since all three are spelled
+ * "timeout" or "authentication" in a sentence.
+ */
+export function classifyFailure(error) {
+    if (error === undefined || error === null)
+        return undefined;
+    if (error instanceof ReceiptError)
+        return error.code;
+    if (typeof error === "object" && error !== null) {
+        const status = error.status;
+        if (typeof status === "number") {
+            const byStatus = categorizeStatus(status);
+            if (byStatus)
+                return byStatus;
+        }
+    }
+    if (error instanceof Error) {
+        if (error.name === "AbortError")
+            return "cancelled";
+        // The SDK's timeout class is a kind of connection error; it must be read
+        // before the message-based network patterns could claim it.
+        if (error.name === "APITimeoutError")
+            return "timeout";
+        if (error.name === "APIConnectionError")
+            return "connection";
+        return classifyError(error.message);
+    }
+    return classifyError(typeof error === "string" ? error : String(error));
 }
 export function buildDecisionReceipt(decision, outcome) {
     return {

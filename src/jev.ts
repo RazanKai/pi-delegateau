@@ -1,12 +1,11 @@
-import { choice, TypeSafeClient } from "@typesafe-ai/sdk";
+import { choice } from "@typesafe-ai/sdk";
 import type { JevChoiceAnswer, JevChoiceInput } from "./types.js";
+import { sharedJevClient, type JevClientLike } from "./jev-client.js";
 import type { ChoiceRuntime } from "./selection.js";
 import { describeCostSignal, describeProviderQuota, resolveCostSignal, type CostModeConfig, type QuotaState, type QuotaStore } from "./quota.js";
 import { modelKey } from "./types.js";
 
-export interface JevClientLike {
-  systemOne(request: unknown, options?: { signal?: AbortSignal; timeout?: number; retry?: { maxRetries: number } }): Promise<any>;
-}
+export type { JevClientLike } from "./jev-client.js";
 
 export class JevSelector implements ChoiceRuntime {
   private readonly client: JevClientLike | undefined;
@@ -32,11 +31,7 @@ export class JevSelector implements ChoiceRuntime {
       this.client = options.client;
       return;
     }
-    try {
-      this.client = new TypeSafeClient({ timeout: this.timeoutMs, retry: { maxRetries: 0 } });
-    } catch {
-      this.client = undefined;
-    }
+    this.client = sharedJevClient(this.timeoutMs);
   }
 
   async choose(input: JevChoiceInput): Promise<JevChoiceAnswer> {

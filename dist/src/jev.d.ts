@@ -1,15 +1,8 @@
 import type { JevChoiceAnswer, JevChoiceInput } from "./types.js";
+import { type JevClientLike } from "./jev-client.js";
 import type { ChoiceRuntime } from "./selection.js";
 import { type CostModeConfig, type QuotaState, type QuotaStore } from "./quota.js";
-export interface JevClientLike {
-    systemOne(request: unknown, options?: {
-        signal?: AbortSignal;
-        timeout?: number;
-        retry?: {
-            maxRetries: number;
-        };
-    }): Promise<any>;
-}
+export type { JevClientLike } from "./jev-client.js";
 export declare class JevSelector implements ChoiceRuntime {
     private readonly client;
     private readonly timeoutMs;

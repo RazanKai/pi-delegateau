@@ -1,4 +1,5 @@
-import { choice, TypeSafeClient } from "@typesafe-ai/sdk";
+import { choice } from "@typesafe-ai/sdk";
+import { sharedJevClient } from "./jev-client.js";
 import { describeCostSignal, describeProviderQuota, resolveCostSignal } from "./quota.js";
 import { modelKey } from "./types.js";
 export class JevSelector {
@@ -24,12 +25,7 @@ export class JevSelector {
             this.client = options.client;
             return;
         }
-        try {
-            this.client = new TypeSafeClient({ timeout: this.timeoutMs, retry: { maxRetries: 0 } });
-        }
-        catch {
-            this.client = undefined;
-        }
+        this.client = sharedJevClient(this.timeoutMs);
     }
     async choose(input) {
         if (!this.client)
