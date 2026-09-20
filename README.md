@@ -148,7 +148,3 @@ Useful control commands inside Pi:
 - `/delegateau enable delegate-execution`
 - `/delegateau enable coordinator-only`
 - `/delegateau disable`
-
-This project is independently implemented and does not require `pi-foreman` at
-runtime. See `NOTICE.md` for the ideas and license attribution used during
-implementation.
