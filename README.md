@@ -1,46 +1,77 @@
 # pi-delegateau
 
-A Pi extension that lets one Pi send a small, self-contained task to a second
-Pi process.
+A Pi extension that uses **Jev** to decide when work should leave the current Pi
+session and which child model should handle it.
 
-The child gets its own session, one selected model, an explicit list of tools,
-and only the task context. The parent keeps control of the overall work.
+That is the point of this extension. A model switcher can choose a model after a
+routing decision has already been made; pi-delegateau asks Jev to make the
+higher-level decision first: keep the task in the current session, or delegate a
+bounded assignment to a child. When delegation is chosen, Jev selects the child
+model from the eligible pool using the task, repository profile, model metadata,
+cost signal, reachability, and quota headroom.
 
-## What it does
+## How the decision flow works
 
-- Starts one child Pi process per assignment, with a bounded parallel slot pool
-  and FIFO queue; one tool call may contain one assignment or a batch.
-- Selects a configured model by pin, fixed default, or optional TypeSafe Jev
-  choice.
-- Allows only trusted child agents and approved child tools, including tools from
-  explicitly allowlisted child extensions.
-- Reports progress, output, errors, cancellation, timeouts, and limits.
-- Writes small JSONL receipts without task bodies or raw prompts.
-- Optionally restricts the parent to coordinating and delegating instead of
-  editing directly.
+For each request, the extension keeps two decisions distinct:
 
-The parent can use the optional Jev-based local-versus-delegated gate. Set
-`"delegationDecision": "jev-suggest"` for an advisory recommendation or
-`"jev-enforce"` to restrict direct execution when Jev recommends delegation.
-Enforcement fails closed if the decision service is unavailable; `manual` keeps
-normal parent behavior. The decision is request-scoped and does not mutate later
-conversation history.
+1. **Delegation decision:** Jev evaluates whether the task should remain in the
+   current Pi session or be delegated. Configure `jev-suggest` for an advisory
+   recommendation or `jev-enforce` to restrict direct execution when Jev selects
+   delegation. Both are request-scoped.
+2. **Child-model decision:** if a child assignment is launched, Jev chooses the
+   model from the eligible candidate pool. Child thinking can be fixed with
+   `childThinking`; provider exhaustion, reachability failures, and cancellation
+   are enforced before launch.
 
-It does not provide a planner, nested delegation, automatic review, repair loop,
-worktree management, or correctness verdicts.
+This is not a replacement for a model-only router. If the desired behavior is
+only “pick a model for this task,” use a model router such as Switchyard. Use
+pi-delegateau when the system must decide whether another Pi process should exist
+at all, then route that child deliberately.
+
+The child receives its own session, selected model, trusted role instructions,
+explicit tools, and bounded task context. It does not receive the parent
+conversation or system prompt. Dispatch is bounded by a parallel slot pool and
+FIFO queue; one `delegate_task` call may contain one assignment or a batch.
+
+## Bootstrap and roles
+
+A fresh project can build its initial pool with:
+
+```text
+/delegateau setup
+/delegateau setup probe
+/delegateau setup apply
+```
+
+Setup reads Pi's live model registry, keeps models with configured credentials,
+preserves provider metadata, and requires confirmation before writing
+`.pi/delegateau.json`. Reachability probing is sequential and explicit; quota
+measurement and external benchmark retrieval are separate opt-in stages.
+
+The built-in role templates are:
+
+- `scout` — read-only local codebase reconnaissance.
+- `researcher` — web and documentation research with sources.
+- `evidence-auditor` — independently checks research claims against sources.
+- `worker` — implementation work with validation.
+- `reviewer` — code review and small directly justified fixes.
+- `oracle` — read-only second opinion that challenges assumptions.
+
+The web roles can use either `pi-web-access` or `donsetch`; the selected extension
+is recorded in the generated child configuration.
 
 ## Requirements
 
 - Node.js `>=22.19.0`
 - Pi coding agent `0.85.1` (the tested compatibility target)
-- A `pi` executable on `PATH` when a child delegation is run
-- TypeSafe credentials only when Jev selection is enabled
+- A `pi` executable on `PATH` when a child assignment is launched
+- TypeSafe credentials for Jev decisions
 
 ## Development
 
 ```sh
 npm install
-npm run check
+env -u TYPESAFE_API_KEY -u TYPESAFE_BASE_URL npm run check
 ```
 
 Load the extension from a checkout:
@@ -54,74 +85,68 @@ metadata.
 
 ## Configuration
 
-Create `.pi/delegateau.json` in the project where Pi runs. A minimal fixed-model
-configuration looks like this:
+The intended configuration lets Jev own both decisions:
 
 ```json
 {
-  "selection": "fixed",
-  "delegationDecision": "manual",
-  "defaultModel": { "provider": "openai", "id": "gpt-4.1-mini" },
+  "selection": "jev",
+  "delegationDecision": "jev-suggest",
+  "allowExternalSensing": true,
   "candidates": [
     {
-      "provider": "openai",
-      "id": "gpt-4.1-mini",
-      "description": "Implementation and test work",
+      "provider": "provider-id",
+      "id": "model-id",
+      "description": "Registry-derived model metadata",
       "capabilities": ["code"],
-      "provenance": "user"
+      "provenance": "built-in"
     }
   ],
   "agents": {
     "worker": {
-      "instructions": "Implement only the assignment and report what changed.",
-      "tools": ["read", "bash", "edit", "write", "lens_diagnostics"],
-      "childExtensions": ["pi-lens"]
+      "instructions": "Implement the assignment, validate it, and report changes precisely.",
+      "tools": ["read", "bash", "edit", "write"]
     }
   }
 }
 ```
 
+`jev-enforce` can be used when direct parent execution must be restricted when
+Jev recommends delegation. `fixed` selection and `manual` delegation are explicit
+escape hatches for controlled operation and tests; they are not the purpose of
+this extension.
+
 Optional fields:
 
-- `childThinking`: fixed thinking level for the child (`off`, `minimal`,
-  `low`, `medium`, `high`, `xhigh`, `max`); passed to the child via
-  `--thinking`.
+- `childThinking`: fixed thinking level for a child (`off`, `minimal`, `low`,
+  `medium`, `high`, `xhigh`, `max`); passed through to Pi.
 - `agents.<name>.childExtensions`: opt-in package names or absolute/`~` paths.
   Names resolve from Pi's global/project package settings and each package's
-  `pi.extensions` manifest. Missing or empty means built-ins only.
+  `pi.extensions` manifest.
 - `limits.concurrency` (default 3) and `limits.maxQueueDepth` (default 20):
   bound running and waiting assignments.
-- `limits.maxExpectedOutputChars` / `limits.maxGatePromptChars`: bounds for
-  the optional expected-output field and the prompt sent to the Jev
-  delegation gate.
-- `allowedParentTools`: may REMOVE tools from enforced modes but can never
-  re-admit `bash`, `powershell`, `edit`, or `write`; `delegate_task` is
-  always kept.
+- `limits.maxExpectedOutputChars` and `limits.maxGatePromptChars`: bound task
+  context and the prompt sent to Jev.
+- `allowedParentTools`: may remove tools from enforced modes but cannot re-admit
+  dangerous execution tools.
 
-Trust and safety behavior:
+## Safety and receipts
 
-- Delegation is refused when the host reports the project untrusted, before
-  any project config is read or child command spawned.
-- Enforced policies fail closed: a missing TypeSafe key, malformed config,
-  or sensor failure installs a blocked restriction for the request instead of
-  silently degrading.
-- Decision receipts store stable error categories, never raw service error
-  text, so prompt content cannot leak into receipts.
-- Provider-served model evidence (`servedModel`) is recorded alongside the
-  requested model; substitution is disclosed in the tool result.
+- Untrusted projects are refused before a child command is spawned.
+- Jev-enforced failures fail closed instead of silently running locally.
+- Candidate eligibility is filtered again immediately before launch.
+- Provider-served model substitutions are disclosed in the tool result.
+- JSONL receipts record stable outcome metadata without task bodies or raw prompts.
 
 The child command defaults to `pi`; set `"piCommand": "/absolute/path/to/pi"`
 when testing from a checkout without a globally installed Pi executable.
 
-The parent can use `delegate_task` with the existing `agent`/`task` fields or an
-`assignments` array. Each assignment gets a distinct dispatch ID and receipt.
-The extension starts another Pi process with `--no-session`, `--no-extensions`,
-zero or more explicit `-e` entries, the chosen model, and the configured child
-tools.
+Use `delegate_task` with either the `agent`/`task` fields or an `assignments` array.
+Each assignment receives an independent dispatch ID, lifecycle, and receipt. The
+child runs with `--no-session`, `--no-extensions`, the selected model, approved
+tools, and any explicitly allowlisted child extensions.
 
-Useful commands inside Pi:
+Useful control commands inside Pi:
 
-- `/delegateau status`
 - `/delegateau override local|delegate|manual` (current request only)
 - `/delegateau enable delegate-execution`
 - `/delegateau enable coordinator-only`
@@ -130,23 +155,11 @@ Useful commands inside Pi:
 ## Documentation
 
 - [Specification](docs/SPEC.md)
-- [Development plan and acceptance status](docs/DEVPLAN.md)
+- [Development plan](docs/DEVPLAN.md)
 - [Work log and verification receipts](docs/WORKLOG.md)
 - [Attribution notice](NOTICE.md)
 - [Third-party license](THIRD_PARTY_LICENSES/pi-foreman-MIT.txt)
 
-## Status
-
-The implementation and local suite are exercised hermetically without TypeSafe
-credentials. Live child-extension and bounded-parallel dispatch evidence is
-recorded in `docs/WORKLOG.md`; the fixed-versus-Jev pilot remains separate.
-
-Known limitations:
-
-- A competing extension that registers `delegate_task` first shadows this
-  extension; Pi 0.85.1 offers no load-time seam to reject that (Pi emits a
-  diagnostic), and `/delegateau status` reports suspected shadowing.
-
-This project is independently implemented. It does not require `pi-foreman` at
+This project is independently implemented and does not require `pi-foreman` at
 runtime. See `NOTICE.md` for the ideas and license attribution used during
 implementation.
