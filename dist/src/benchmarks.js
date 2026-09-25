@@ -91,38 +91,54 @@ export function benchmarkRecordKey(value) {
     return [modelKey(value.model), benchmarkComparisonKey(value), value.date, String(value.score)].join("\u001f");
 }
 /**
- * Strict parser for records already embedded in policy config.
+ * Parse records embedded in policy config.
  *
  * Config-embedded records go through the SAME bounds the acquisition path
- * enforces, including the 730-day age rule the setup help and README advertise.
- * Without it a hand-written config could carry a `2001-01-01` or `2099-12-31`
- * record into the chooser while the documented rule applied only to imported
- * data — the documented limit has to hold wherever a record can enter.
+ * enforces, including the documented 730-day age rule. Without it a hand-written
+ * config could carry a `2001-01-01` or `2099-12-31` record into the chooser while
+ * the documented rule applied only to imported data — the documented limit has to
+ * hold wherever a record can enter.
+ *
+ * SHAPE errors still throw: a record that is malformed, names a different model,
+ * or duplicates another is a config the author must fix. An AGE fault (stale or
+ * future-dated) is DEMOTED instead — dropped from the candidate with a diagnostic,
+ * leaving the candidate unmeasured — because age is not a config authoring
+ * mistake: a valid config decays into invalidity purely by the passage of time.
+ * Throwing there would make `loadConfig` uncaught-throw at dispatch and
+ * session_start, so a config that worked for two years would one day stop the
+ * whole extension from loading. That contradicts the contract that missing
+ * evidence never removes a candidate.
  */
 export function parseConfiguredBenchmarks(value, identity, name, now = Date.now()) {
     if (value === undefined)
-        return undefined;
+        return { diagnostics: [] };
     if (!Array.isArray(value))
         throw new Error(`${name} must be an array`);
     if (value.length > MAX_BENCHMARK_RECORDS_PER_MODEL)
         throw new Error(`${name} must contain at most ${MAX_BENCHMARK_RECORDS_PER_MODEL} records`);
+    const diagnostics = [];
     const seen = new Set();
-    const parsed = value.map((item, index) => {
+    const parsed = [];
+    value.forEach((item, index) => {
         const result = parseShape(item);
         if (!result.evidence || modelKey(result.evidence.model) !== modelKey(identity))
             throw new Error(`${name}[${index}] is invalid or does not match the candidate identity`);
         const at = Date.parse(`${result.evidence.date}T00:00:00.000Z`);
-        if (at > now)
-            throw new Error(`${name}[${index}] is dated in the future (${result.evidence.date})`);
-        if (now - at > MAX_BENCHMARK_AGE_MS)
-            throw new Error(`${name}[${index}] is older than 730 days (${result.evidence.date})`);
+        if (at > now) {
+            diagnostics.push(diagnostic("future-dated", index, result.evidence.model));
+            return;
+        }
+        if (now - at > MAX_BENCHMARK_AGE_MS) {
+            diagnostics.push(diagnostic("stale", index, result.evidence.model));
+            return;
+        }
         const key = benchmarkRecordKey(result.evidence);
         if (seen.has(key))
             throw new Error(`${name}[${index}] duplicates an existing benchmark record`);
         seen.add(key);
-        return result.evidence;
+        parsed.push(result.evidence);
     });
-    return parsed.length > 0 ? parsed : undefined;
+    return { ...(parsed.length > 0 ? { benchmarks: parsed } : {}), diagnostics };
 }
 /** Validate untrusted external data record-by-record; ignored input yields stable diagnostics only. */
 export function normalizeBenchmarkDocument(value, options) {

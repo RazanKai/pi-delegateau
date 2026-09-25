@@ -133,7 +133,8 @@ function readCandidate(value, index, now) {
     if (reasoning !== undefined && typeof reasoning !== "boolean")
         throw new Error(`candidates[${index}].reasoning must be a boolean`);
     const inputModalities = value.inputModalities === undefined ? undefined : readStringArray(value.inputModalities, `candidates[${index}].inputModalities`);
-    const benchmarks = parseConfiguredBenchmarks(value.benchmarks, identity, `candidates[${index}].benchmarks`, now);
+    const parsed = parseConfiguredBenchmarks(value.benchmarks, identity, `candidates[${index}].benchmarks`, now);
+    const benchmarks = parsed.benchmarks;
     const cost = isRecord(value.cost)
         ? {
             ...(typeof value.cost.input === "number" && Number.isFinite(value.cost.input) && value.cost.input >= 0 ? { input: value.cost.input } : {}),
@@ -145,19 +146,22 @@ function readCandidate(value, index, now) {
     if (costSource !== undefined && costSource !== "provider" && costSource !== "user")
         throw new Error(`candidates[${index}].costSource is invalid`);
     return {
-        identity,
-        description,
-        capabilities,
-        ...(limitations ? { limitations } : {}),
-        provenance,
-        ...(contextWindow ? { contextWindow } : {}),
-        ...(latencyMs ? { latencyMs } : {}),
-        ...(maxOutputTokens ? { maxOutputTokens } : {}),
-        ...(reasoning !== undefined ? { reasoning } : {}),
-        ...(inputModalities && inputModalities.length > 0 ? { inputModalities } : {}),
-        ...(benchmarks ? { benchmarks } : {}),
-        ...(cost && Object.keys(cost).length > 0 ? { cost } : {}),
-        ...(costSource ? { costSource } : {}),
+        candidate: {
+            identity,
+            description,
+            capabilities,
+            ...(limitations ? { limitations } : {}),
+            provenance,
+            ...(contextWindow ? { contextWindow } : {}),
+            ...(latencyMs ? { latencyMs } : {}),
+            ...(maxOutputTokens ? { maxOutputTokens } : {}),
+            ...(reasoning !== undefined ? { reasoning } : {}),
+            ...(inputModalities && inputModalities.length > 0 ? { inputModalities } : {}),
+            ...(benchmarks ? { benchmarks } : {}),
+            ...(cost && Object.keys(cost).length > 0 ? { cost } : {}),
+            ...(costSource ? { costSource } : {}),
+        },
+        diagnostics: parsed.diagnostics,
     };
 }
 function readPositiveInt(value, name, fallback) {
@@ -217,7 +221,11 @@ export function parseConfig(raw, now = Date.now()) {
     const candidatesRaw = input.candidates === undefined ? [] : input.candidates;
     if (!Array.isArray(candidatesRaw))
         throw new Error("candidates must be an array");
-    const candidates = candidatesRaw.map((value, index) => readCandidate(value, index, now));
+    const readCandidates = candidatesRaw.map((value, index) => readCandidate(value, index, now));
+    const candidates = readCandidates.map((entry) => entry.candidate);
+    // Records that aged out (or are future-dated) are dropped here rather than
+    // thrown: a config valid for two years must not become unloadable overnight.
+    const benchmarkDiagnostics = readCandidates.flatMap((entry) => entry.diagnostics);
     const seen = new Set();
     for (const candidate of candidates) {
         const key = modelKey(candidate.identity);
@@ -283,6 +291,7 @@ export function parseConfig(raw, now = Date.now()) {
             coordinatorOnly: sanitizeAllowedTools(readTools(allowedInput.coordinatorOnly), DEFAULT_ALLOWED.coordinatorOnly, "coordinator-only"),
         },
         limits,
+        ...(benchmarkDiagnostics.length > 0 ? { benchmarkDiagnostics } : {}),
         ...(childThinking ? { childThinking } : {}),
         ...(costMode ? { costMode } : {}),
         ...(health ? { health } : {}),

@@ -1,4 +1,5 @@
-import { type BenchmarkEvidence, type CandidateProfile, type ModelIdentity } from "./types.js";
+import { type BenchmarkDiagnostic, type BenchmarkEvidence, type CandidateProfile, type ModelIdentity } from "./types.js";
+export type { BenchmarkDiagnostic, BenchmarkDiagnosticCategory } from "./types.js";
 export declare const BENCHMARK_CACHE_VERSION: 1;
 export declare const MAX_BENCHMARK_RECORDS_PER_MODEL = 8;
 export declare const MAX_BENCHMARK_IMPORT_RECORDS = 256;
@@ -9,14 +10,6 @@ export declare const MAX_BENCHMARK_ABS_SCORE = 1000000000;
 export declare const MAX_BENCHMARK_URL = 2048;
 export declare const MAX_BENCHMARK_IMPORT_BYTES = 1000000;
 export declare const MAX_BENCHMARK_AGE_MS: number;
-export type BenchmarkDiagnosticCategory = "malformed" | "unmatched-model" | "unsupported-metric" | "stale" | "future-dated" | "unsafe-source-url" | "limit-exceeded" | "oversize" | "source-unavailable";
-export interface BenchmarkDiagnostic {
-    category: BenchmarkDiagnosticCategory;
-    index?: number;
-    model?: string;
-    /** Bounded stable source identifier for an unmatched record; never a raw body. */
-    sourceId?: string;
-}
 export interface BenchmarkImportReport {
     records: BenchmarkEvidence[];
     diagnostics: BenchmarkDiagnostic[];
@@ -38,15 +31,28 @@ export declare function benchmarkComparisonKey(value: BenchmarkEvidence): string
  */
 export declare function benchmarkRecordKey(value: BenchmarkEvidence): string;
 /**
- * Strict parser for records already embedded in policy config.
+ * Parse records embedded in policy config.
  *
  * Config-embedded records go through the SAME bounds the acquisition path
- * enforces, including the 730-day age rule the setup help and README advertise.
- * Without it a hand-written config could carry a `2001-01-01` or `2099-12-31`
- * record into the chooser while the documented rule applied only to imported
- * data — the documented limit has to hold wherever a record can enter.
+ * enforces, including the documented 730-day age rule. Without it a hand-written
+ * config could carry a `2001-01-01` or `2099-12-31` record into the chooser while
+ * the documented rule applied only to imported data — the documented limit has to
+ * hold wherever a record can enter.
+ *
+ * SHAPE errors still throw: a record that is malformed, names a different model,
+ * or duplicates another is a config the author must fix. An AGE fault (stale or
+ * future-dated) is DEMOTED instead — dropped from the candidate with a diagnostic,
+ * leaving the candidate unmeasured — because age is not a config authoring
+ * mistake: a valid config decays into invalidity purely by the passage of time.
+ * Throwing there would make `loadConfig` uncaught-throw at dispatch and
+ * session_start, so a config that worked for two years would one day stop the
+ * whole extension from loading. That contradicts the contract that missing
+ * evidence never removes a candidate.
  */
-export declare function parseConfiguredBenchmarks(value: unknown, identity: ModelIdentity, name: string, now?: number): BenchmarkEvidence[] | undefined;
+export declare function parseConfiguredBenchmarks(value: unknown, identity: ModelIdentity, name: string, now?: number): {
+    benchmarks?: BenchmarkEvidence[];
+    diagnostics: BenchmarkDiagnostic[];
+};
 /** Validate untrusted external data record-by-record; ignored input yields stable diagnostics only. */
 export declare function normalizeBenchmarkDocument(value: unknown, options: NormalizeBenchmarkOptions): BenchmarkImportReport;
 export declare function benchmarkCachePath(agentDir?: string): string;

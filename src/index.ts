@@ -508,7 +508,13 @@ export default function (pi: ExtensionAPI): void {
         const openOnly = openCircuits.filter((entry) => entry.trialExpired !== true);
         const healthText = `, health=${openOnly.length} open circuit${openOnly.length === 1 ? "" : "s"}${openOnly.length > 0 ? ` (${openOnly.slice(0, 3).map((entry) => `${entry.model}: ${entry.category ?? "unknown"} until ${entry.openUntil ?? "unknown"}`).join("; ")}${openOnly.length > 3 ? `; +${openOnly.length - 3} more` : ""})` : ""}${expiredTrials.length > 0 ? `, ${expiredTrials.length} stale trial claim${expiredTrials.length === 1 ? "" : "s"} cleared (${expiredTrials.slice(0, 3).map((entry) => entry.model).join("; ")})` : ""}`;
         const measuredCandidates = config.candidates.filter((candidate) => (candidate.benchmarks?.length ?? 0) > 0).length;
-        const benchmarkText = `, benchmarks=${measuredCandidates}/${config.candidates.length} candidates measured`;
+        // Records that aged out of the config are surfaced, not silently gone: the
+        // only way a reader learns a candidate lost its evidence is being told.
+        const droppedRecords = config.benchmarkDiagnostics ?? [];
+        const droppedText = droppedRecords.length > 0
+          ? `; ${droppedRecords.length} config record${droppedRecords.length === 1 ? "" : "s"} dropped as ${[...new Set(droppedRecords.map((entry) => entry.category))].join("/")} — refresh with /delegateau setup retrieve`
+          : "";
+        const benchmarkText = `, benchmarks=${measuredCandidates}/${config.candidates.length} candidates measured${droppedText}`;
         const sourceText = `, config=${resolved.source}${resolved.path ? ` (${resolved.path})` : ""}`;
         ctx.ui.notify(`${statusText(config, mode.current())}, delegation decision=${config.delegationDecision}${decisionText}${busyText}${healthText}${benchmarkText}${sourceText}${shadowText}`, "info");
         return;

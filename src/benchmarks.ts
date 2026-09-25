@@ -1,7 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { modelKey, type BenchmarkDirection, type BenchmarkEvidence, type CandidateProfile, type ModelIdentity } from "./types.js";
+import { modelKey, type BenchmarkDiagnostic, type BenchmarkDiagnosticCategory, type BenchmarkDirection, type BenchmarkEvidence, type CandidateProfile, type ModelIdentity } from "./types.js";
+
+// The diagnostic type lives in `types.ts` because `DelegateConfig` carries it and
+// `types.ts` cannot import from this module without a cycle. Re-exported here so
+// existing importers keep working.
+export type { BenchmarkDiagnostic, BenchmarkDiagnosticCategory } from "./types.js";
 
 export const BENCHMARK_CACHE_VERSION = 1 as const;
 export const MAX_BENCHMARK_RECORDS_PER_MODEL = 8;
@@ -13,25 +18,6 @@ export const MAX_BENCHMARK_ABS_SCORE = 1_000_000_000;
 export const MAX_BENCHMARK_URL = 2_048;
 export const MAX_BENCHMARK_IMPORT_BYTES = 1_000_000;
 export const MAX_BENCHMARK_AGE_MS = 730 * 24 * 60 * 60 * 1_000;
-
-export type BenchmarkDiagnosticCategory =
-  | "malformed"
-  | "unmatched-model"
-  | "unsupported-metric"
-  | "stale"
-  | "future-dated"
-  | "unsafe-source-url"
-  | "limit-exceeded"
-  | "oversize"
-  | "source-unavailable";
-
-export interface BenchmarkDiagnostic {
-  category: BenchmarkDiagnosticCategory;
-  index?: number;
-  model?: string;
-  /** Bounded stable source identifier for an unmatched record; never a raw body. */
-  sourceId?: string;
-}
 
 export interface BenchmarkImportReport {
   records: BenchmarkEvidence[];
@@ -127,31 +113,54 @@ export function benchmarkRecordKey(value: BenchmarkEvidence): string {
 }
 
 /**
- * Strict parser for records already embedded in policy config.
+ * Parse records embedded in policy config.
  *
  * Config-embedded records go through the SAME bounds the acquisition path
- * enforces, including the 730-day age rule the setup help and README advertise.
- * Without it a hand-written config could carry a `2001-01-01` or `2099-12-31`
- * record into the chooser while the documented rule applied only to imported
- * data — the documented limit has to hold wherever a record can enter.
+ * enforces, including the documented 730-day age rule. Without it a hand-written
+ * config could carry a `2001-01-01` or `2099-12-31` record into the chooser while
+ * the documented rule applied only to imported data — the documented limit has to
+ * hold wherever a record can enter.
+ *
+ * SHAPE errors still throw: a record that is malformed, names a different model,
+ * or duplicates another is a config the author must fix. An AGE fault (stale or
+ * future-dated) is DEMOTED instead — dropped from the candidate with a diagnostic,
+ * leaving the candidate unmeasured — because age is not a config authoring
+ * mistake: a valid config decays into invalidity purely by the passage of time.
+ * Throwing there would make `loadConfig` uncaught-throw at dispatch and
+ * session_start, so a config that worked for two years would one day stop the
+ * whole extension from loading. That contradicts the contract that missing
+ * evidence never removes a candidate.
  */
-export function parseConfiguredBenchmarks(value: unknown, identity: ModelIdentity, name: string, now = Date.now()): BenchmarkEvidence[] | undefined {
-  if (value === undefined) return undefined;
+export function parseConfiguredBenchmarks(
+  value: unknown,
+  identity: ModelIdentity,
+  name: string,
+  now = Date.now(),
+): { benchmarks?: BenchmarkEvidence[]; diagnostics: BenchmarkDiagnostic[] } {
+  if (value === undefined) return { diagnostics: [] };
   if (!Array.isArray(value)) throw new Error(`${name} must be an array`);
   if (value.length > MAX_BENCHMARK_RECORDS_PER_MODEL) throw new Error(`${name} must contain at most ${MAX_BENCHMARK_RECORDS_PER_MODEL} records`);
+  const diagnostics: BenchmarkDiagnostic[] = [];
   const seen = new Set<string>();
-  const parsed = value.map((item, index) => {
+  const parsed: BenchmarkEvidence[] = [];
+  value.forEach((item, index) => {
     const result = parseShape(item);
     if (!result.evidence || modelKey(result.evidence.model) !== modelKey(identity)) throw new Error(`${name}[${index}] is invalid or does not match the candidate identity`);
     const at = Date.parse(`${result.evidence.date}T00:00:00.000Z`);
-    if (at > now) throw new Error(`${name}[${index}] is dated in the future (${result.evidence.date})`);
-    if (now - at > MAX_BENCHMARK_AGE_MS) throw new Error(`${name}[${index}] is older than 730 days (${result.evidence.date})`);
+    if (at > now) {
+      diagnostics.push(diagnostic("future-dated", index, result.evidence.model));
+      return;
+    }
+    if (now - at > MAX_BENCHMARK_AGE_MS) {
+      diagnostics.push(diagnostic("stale", index, result.evidence.model));
+      return;
+    }
     const key = benchmarkRecordKey(result.evidence);
     if (seen.has(key)) throw new Error(`${name}[${index}] duplicates an existing benchmark record`);
     seen.add(key);
-    return result.evidence;
+    parsed.push(result.evidence);
   });
-  return parsed.length > 0 ? parsed : undefined;
+  return { ...(parsed.length > 0 ? { benchmarks: parsed } : {}), diagnostics };
 }
 
 /** Validate untrusted external data record-by-record; ignored input yields stable diagnostics only. */

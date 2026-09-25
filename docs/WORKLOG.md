@@ -1,5 +1,54 @@
 # pi-delegateau work log
 
+## 2026-09-25 22:30 CEST — evidence freshness, and a defect the age rule introduced
+
+Prompted by "how does this data get updated over time as the available models change":
+audited drift behaviour against the live cache instead of reasoning about it, and the
+audit found a real defect **introduced by the previous fix round** in this session.
+
+- **The defect.** The 730-day age rule was enforced in `parseConfiguredBenchmarks` by
+  THROWING. `loadConfig` is called uncaught at the dispatch tool handler
+  (`src/index.ts:316`) and at `session_start` (`:664`), so a config record that simply
+  AGED OUT would make the whole config unloadable — every dispatch and every session
+  start failing, from a documented limit, with no authoring mistake involved. Measured
+  before the fix: a config with one record dated 800 days ago threw
+  `candidates[0].benchmarks[0] is older than 730 days`. The operator's live config,
+  written today, would have hit this on 2028-09-25. This contradicted the SPEC contract
+  that missing evidence never removes a candidate.
+- **The fix.** Age faults are DEMOTED, not thrown: the record is dropped with a bounded
+  diagnostic and the candidate stays in the pool, unmeasured. A SHAPE fault (malformed,
+  wrong identity, duplicate) still refuses the config — that is an authoring error the
+  author must fix. Age is not: a valid config decays into invalidity by the passage of
+  time. `DelegateConfig.benchmarkDiagnostics` carries what was dropped (derived at load,
+  never serialized) and `/delegateau status` reports the count and category with the
+  refresh command. `BenchmarkDiagnostic` moved to `types.ts` (re-exported from
+  `benchmarks.ts`) because `DelegateConfig` carries it and `types.ts` cannot import from
+  `benchmarks.ts` without a cycle.
+- **Verified on the operator's real config with a simulated clock:** aging every record
+  past the window leaves `candidates=10` (pool intact), 0 carrying evidence, 22 `stale`
+  diagnostics, and the config LOADS.
+- **Red-on-base:** with only the production change reverted (age faults throwing again) in
+  a scratch copy, both new tests fail — `applies the documented age rule to records
+  embedded in config` and `ages a config record out without making the config
+  unloadable`; they pass on the fixed tree.
+- **Drift behaviour, measured** (not assumed): a model leaving the live registry demotes
+  its records to `unmatched-model` (51→50 records, 1 diagnostic); the clock passing the
+  age window demotes all of them to `stale` (51→0 records, 51 diagnostics); a config
+  record naming a ghost identity is still refused at parse. The cache path already
+  degrades to "unmeasured" — only the config path failed closed.
+- **Nothing refreshes implicitly** (`setInterval` appears nowhere in `src/`; every
+  `setTimeout` is a request deadline or kill timer). Refresh is an explicit command, so
+  evidence ages visibly. Added `scripts/benchmark-freshness.mjs`: a read-only report of
+  evidence age, the pool's measured/unmeasured split, the exact date the oldest record
+  leaves the config, and whether a refresh is worth running; `--refresh` re-derives the
+  mapping and re-retrieves when the credential is present. It deliberately does NOT treat
+  a structurally unmatchable model as "refresh due" — a model with no exact catalog match
+  cannot be measured by fetching, so demanding a fetch for it would be a false alarm
+  (measured: 2 of 10 candidates are in that state while the evidence is 0 days old).
+- Canonical `env -u TYPESAFE_API_KEY -u TYPESAFE_BASE_URL npm run check`: **27 files /
+  241 tests passed**. `--refresh` verified idempotent against the live credential
+  (re-derives 19/25 mappings; second run attaches 0 records, 22 already present).
+
 ## 2026-09-25 19:17 CEST — review-fix round, derived AA mapping, live credentialed retrieval
 
 - Independent final review of the uncommitted tree (delegated, own context) returned

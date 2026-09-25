@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   collectBenchmarkEvidence,
   importBenchmarkFile,
+  MAX_BENCHMARK_AGE_MS,
   mergeBenchmarkReport,
   normalizeBenchmarkDocument,
   type BenchmarkCache,
@@ -128,12 +129,40 @@ describe("benchmark evidence import and config boundary", () => {
   it("applies the documented age rule to records embedded in config", () => {
     const now = new Date("2026-09-21T00:00:00.000Z").getTime();
     // The setup help and README advertise a 730-day rule; a hand-written config
-    // must not be able to bypass it.
-    expect(() => parseConfig({ candidates: [{ ...knownModels[0], benchmarks: [{ ...record(), date: "2001-01-01" }] }] }, now)).toThrow(/older than 730 days/);
-    expect(() => parseConfig({ candidates: [{ ...knownModels[0], benchmarks: [{ ...record(), date: "2099-12-31" }] }] }, now)).toThrow(/future/);
-    // A record inside the window still parses.
+    // must not be able to bypass it. The record is DEMOTED, not thrown on: the
+    // limit is enforced by dropping the record, never by breaking config load.
+    const tooOld = parseConfig({ candidates: [{ ...knownModels[0], benchmarks: [{ ...record(), date: "2001-01-01" }] }] }, now);
+    expect(tooOld.candidates[0]!.benchmarks).toBeUndefined();
+    expect(tooOld.benchmarkDiagnostics?.map((entry) => entry.category)).toEqual(["stale"]);
+    const fromTheFuture = parseConfig({ candidates: [{ ...knownModels[0], benchmarks: [{ ...record(), date: "2099-12-31" }] }] }, now);
+    expect(fromTheFuture.candidates[0]!.benchmarks).toBeUndefined();
+    expect(fromTheFuture.benchmarkDiagnostics?.map((entry) => entry.category)).toEqual(["future-dated"]);
+    // A record inside the window still parses, and produces no diagnostics.
     const ok = parseConfig({ candidates: [{ ...knownModels[0], benchmarks: [{ ...record(), date: "2026-01-08" }] }] }, now);
     expect(ok.candidates[0]!.benchmarks).toHaveLength(1);
+    expect(ok.benchmarkDiagnostics).toBeUndefined();
+  });
+
+  it("ages a config record out without making the config unloadable", () => {
+    // A config is valid when written and becomes invalid purely by the passage of
+    // time. Throwing here reached an uncaught `loadConfig` at dispatch and
+    // session_start, so a config that worked for two years would one day stop the
+    // whole extension from loading — a scheduled outage from a documented limit.
+    const written = new Date("2026-09-25T00:00:00.000Z").getTime();
+    const later = written + MAX_BENCHMARK_AGE_MS + 24 * 60 * 60 * 1000;
+    const raw = { candidates: [{ ...knownModels[0], benchmarks: [{ ...record(), date: "2026-09-25" }] }] };
+    expect(parseConfig(raw, written).candidates[0]!.benchmarks).toHaveLength(1);
+
+    const aged = parseConfig(raw, later);
+    expect(aged.candidates).toHaveLength(1); // the candidate SURVIVES, unmeasured
+    expect(aged.candidates[0]!.benchmarks).toBeUndefined();
+    expect(aged.benchmarkDiagnostics?.map((entry) => entry.category)).toEqual(["stale"]);
+    // A future-dated record is demoted the same way, not fatal.
+    const ahead = parseConfig({ candidates: [{ ...knownModels[0], benchmarks: [{ ...record(), date: "2099-12-31" }] }] }, written);
+    expect(ahead.candidates[0]!.benchmarks).toBeUndefined();
+    expect(ahead.benchmarkDiagnostics?.map((entry) => entry.category)).toEqual(["future-dated"]);
+    // A SHAPE fault is still a config the author must fix, so it still throws.
+    expect(() => parseConfig({ candidates: [{ ...knownModels[0], benchmarks: [{ ...record(), date: "2026-09-25", score: Number.NaN }] }] }, written)).toThrow();
   });
 
   it("ignores untrusted provenance without echoing the rejected value", () => {

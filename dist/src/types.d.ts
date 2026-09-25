@@ -66,6 +66,19 @@ export interface CandidateProfile {
     benchmarks?: BenchmarkEvidence[];
 }
 /**
+ * A record that was dropped rather than attached to a candidate. Categories keep
+ * raw source bodies out of the ledger: a reader learns WHAT was wrong, never the
+ * content that carried the fault.
+ */
+export type BenchmarkDiagnosticCategory = "malformed" | "unmatched-model" | "unsupported-metric" | "stale" | "future-dated" | "unsafe-source-url" | "limit-exceeded" | "oversize" | "source-unavailable";
+export interface BenchmarkDiagnostic {
+    category: BenchmarkDiagnosticCategory;
+    index?: number;
+    model?: string;
+    /** Bounded stable source identifier for an unmatched record; never a raw body. */
+    sourceId?: string;
+}
+/**
  * Complexity of the work, modelled on the six-level classification used by
  * subscription-aware routers (see pkg-research notes). An ordinal scale gives
  * the chooser a difficulty axis that a three-value cost/quality preference
@@ -262,6 +275,14 @@ export interface DelegateConfig {
     piCommand?: string;
     /** Runtime health circuit policy (threshold/window/cooldown/path). */
     health?: HealthConfig;
+    /**
+     * Derived at load time, never serialized: records written into the config that
+     * were dropped because they aged out (or are future-dated). Age is not an
+     * authoring mistake — a valid config decays into invalidity by the passage of
+     * time — so the record is demoted and the candidate left unmeasured, and this
+     * records what was dropped so the status/review surface can say so.
+     */
+    benchmarkDiagnostics?: BenchmarkDiagnostic[];
 }
 export declare function modelKey(identity: ModelIdentity): string;
 export declare function sameModel(a: ModelIdentity, b: ModelIdentity): boolean;

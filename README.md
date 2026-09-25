@@ -64,7 +64,7 @@ fails closed at whichever level it was found rather than silently falling back t
 defaults. `/delegateau status` reports which source is in effect:
 `config=global (/home/user/.pi/agent/delegateau.json)`.
 
-Benchmark evidence is acquired only by an explicit command. `setup import` reads a
+Benchmark evidence is acquired only by an explicit command, and nothing refreshes it implicitly: `scripts/benchmark-freshness.mjs` reports evidence age, the exact date the oldest record leaves the config, and whether a refresh is worth running (read-only; `--refresh` re-derives the mapping and re-retrieves when the credential is present). `setup import` reads a
 local structured JSON document and makes no network request. `setup retrieve
 artificial-analysis` is the one supported network adapter: it calls Artificial
 Analysis's authenticated v2 Free-tier language-model endpoint
