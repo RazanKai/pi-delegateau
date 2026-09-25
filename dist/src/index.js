@@ -2,15 +2,19 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "typebox";
 import { DispatchAdmission } from "./admission.js";
-import { loadConfig, CONFIG_FILE_NAME, CHILD_TOOLS } from "./config.js";
+import { loadConfig, resolveConfig, CONFIG_FILE_NAME, CHILD_TOOLS } from "./config.js";
+import { benchmarkCachePath, benchmarkRecordKey, importBenchmarkFile, mergeBenchmarkReport, readBenchmarkCache, revalidateBenchmarkCache, writeBenchmarkCache } from "./benchmarks.js";
+import { ARTIFICIAL_ANALYSIS_API_KEY_ENV, ARTIFICIAL_ANALYSIS_SOURCE, parseSourceModelMap, retrieveArtificialAnalysis } from "./benchmark-retrieval.js";
 import { DispatchFailure, executeDispatch, validateAssignment, validateConfiguredChildTools } from "./dispatch.js";
+import { resolveEligibleCandidates } from "./eligibility.js";
+import { HealthStore } from "./health-store.js";
 import { JevSelector } from "./jev.js";
 import { DelegationGate, JevDelegationSelector } from "./gate.js";
 import { ModeController, policyForMode } from "./mode.js";
 import { buildRepositoryProfile, describeFailureCost } from "./live-data.js";
 import { quotaSelectorOptions } from "./selector-options.js";
-import { resolveCostMode, filterCandidatesByQuota, readQuotaState } from "./quota.js";
-import { buildSetupPlan, detectWebAccessExtensions, probeSetupPlan, setupConfig, writeSetupConfig } from "./onboarding.js";
+import { resolveCostMode, readQuotaState } from "./quota.js";
+import { buildSetupPlan, detectWebAccessExtensions, discoverSetupCandidates, probeSetupPlan, setupConfig, writeSetupConfig } from "./onboarding.js";
 import { readProbeCache, probeWorkingDir, writeProbeCache } from "./reachability.js";
 import { appendReceipt, defaultDecisionReceiptPath } from "./receipt-store.js";
 import { buildDecisionReceipt, sanitizeError } from "./receipts.js";
@@ -45,17 +49,14 @@ function configuredAgent(config, name) {
     const pin = config.agentPins[name] ?? agent.model;
     return pin ? { ...agent, model: pin } : agent;
 }
-function eligibleCandidates(config, agent, ctx, quotaState) {
-    const candidates = [];
-    for (const candidate of filterCandidatesByQuota(config.candidates, quotaState)) {
-        const model = ctx.modelRegistry.find(candidate.identity.provider, candidate.identity.id);
-        if (!model || !ctx.modelRegistry.hasConfiguredAuth(model))
-            continue;
-        if (agent.tools.some((tool) => tool === TOOL_NAME || (!CHILD_TOOLS.has(tool) && (agent.childExtensions?.length ?? 0) === 0)))
-            continue;
-        candidates.push(candidate);
-    }
-    return candidates;
+function eligibleCandidates(config, agent, ctx, quotaState, health) {
+    return resolveEligibleCandidates({
+        config,
+        agent,
+        ctx,
+        ...(quotaState ? { quotaState } : {}),
+        ...(health ? { health } : {}),
+    }).candidates;
 }
 function validateChildTools(agent) {
     validateConfiguredChildTools(agent);
@@ -66,7 +67,7 @@ function validateChildTools(agent) {
  * the gate's "childAvailable" must mean dispatch can actually launch a child
  * under the same precedence rules.
  */
-function launchableChild(config, agentName, ctx, jevChoose, quotaState) {
+function launchableChild(config, agentName, ctx, jevChoose, quotaState, health) {
     const agent = config.agents[agentName];
     if (!agent)
         return undefined;
@@ -78,7 +79,7 @@ function launchableChild(config, agentName, ctx, jevChoose, quotaState) {
     }
     const pinned = config.agentPins[agentName] ?? agent.model;
     const effectiveAgent = pinned ? { ...agent, model: pinned } : agent;
-    const candidates = eligibleCandidates(config, effectiveAgent, ctx, quotaState);
+    const candidates = eligibleCandidates(config, effectiveAgent, ctx, quotaState, health);
     if (candidates.length === 0)
         return undefined;
     const request = {
@@ -119,20 +120,26 @@ function resolveLaunchModelImpl(request, jevChoose) {
         return request.candidates[0].identity; // chooser live; dispatch revalidates anyway
     return undefined;
 }
-function gateCandidates(config, ctx, jevChoose) {
+function gateCandidates(config, ctx, jevChoose, health) {
     const agentNames = [];
     const providerQuota = readQuotaState();
     let anyLaunchable = false;
     for (const name of Object.keys(config.agents)) {
-        if (launchableChild(config, name, ctx, jevChoose, providerQuota)) {
+        if (launchableChild(config, name, ctx, jevChoose, providerQuota, health)) {
             agentNames.push(name);
             anyLaunchable = true;
         }
     }
-    const candidates = filterCandidatesByQuota(config.candidates, providerQuota).filter((candidate) => {
-        const model = ctx.modelRegistry.find(candidate.identity.provider, candidate.identity.id);
-        return Boolean(model && ctx.modelRegistry.hasConfiguredAuth(model));
-    });
+    // The gate's candidate pool is agent-independent: use an agent whose tools
+    // are structurally valid so only registry/auth/quota/reachability/health
+    // filter the pool, exactly as dispatch would see it.
+    const candidates = resolveEligibleCandidates({
+        config,
+        agent: { name: "gate", instructions: "", tools: [] },
+        ctx,
+        ...(providerQuota ? { quotaState: providerQuota } : {}),
+        ...(health ? { health } : {}),
+    }).candidates;
     return { candidates, childAvailable: anyLaunchable, agentNames, providerQuota };
 }
 function parentCapabilities(ctx) {
@@ -144,8 +151,8 @@ function parentCapabilities(ctx) {
         ...(ctx.getSystemPrompt?.().length ? ["current-context"] : []),
     ];
 }
-function buildGateInput(config, mode, ctx, prompt, jevChoose) {
-    const available = gateCandidates(config, ctx, jevChoose);
+function buildGateInput(config, mode, ctx, prompt, jevChoose, health) {
+    const available = gateCandidates(config, ctx, jevChoose, health);
     const model = ctx.model;
     return {
         // Bounded gate prompt (F11): oversized prompts are truncated for sensing,
@@ -206,6 +213,21 @@ function statusText(config, mode) {
     const candidates = config.candidates.map((candidate) => modelKey(candidate.identity)).join(", ") || "none";
     const agents = Object.keys(config.agents).join(", ") || "none";
     return `pi-delegateau: mode=${mode}, selection=${config.selection}, preference=${config.preference}, agents=${agents}, configured candidates=${candidates}, Jev disclosure=${config.allowExternalSensing ? "allowed" : "prohibited"}`;
+}
+// All dispatches in one extension instance share the in-memory store. This
+// prevents concurrent parent tool calls from loading the same JSON snapshot and
+// overwriting each other's failure event; the store still persists across Pi
+// restarts. A changed project/config gets a separate store rather than mutating
+// the policy of an in-flight dispatch.
+const healthStores = new Map();
+function healthStoreFor(cwd, config) {
+    const key = JSON.stringify([cwd, config.health ?? null]);
+    const existing = healthStores.get(key);
+    if (existing)
+        return existing;
+    const store = new HealthStore({ cwd, config: config.health });
+    healthStores.set(key, store);
+    return store;
 }
 async function writeDecisionReceipt(config, decision, outcome, notify) {
     try {
@@ -278,6 +300,9 @@ export default function (pi) {
             }
             const config = loadConfig(ctx.cwd);
             admission.configure(config.limits.concurrency, config.limits.maxQueueDepth);
+            // One shared store per project/config: batch siblings and concurrent
+            // parent calls observe each other's half-open trials and failure events.
+            const health = healthStoreFor(ctx.cwd, config);
             const hasBatch = params.assignments !== undefined;
             const hasSingle = params.agent !== undefined || params.task !== undefined || params.expectedOutput !== undefined || params.context !== undefined;
             if (hasBatch === hasSingle) {
@@ -322,6 +347,7 @@ export default function (pi) {
                 ...(onUpdate ? { onUpdate } : {}),
                 ...(owningDecisionId ? { decisionId: owningDecisionId } : {}),
                 ...(owningComplexity ? { complexity: owningComplexity } : {}),
+                health,
                 registerController: (controller) => activeDispatches.add(controller),
                 unregisterController: (controller) => activeDispatches.delete(controller),
                 markDelegated: () => gate.markExecution("delegated"),
@@ -353,23 +379,96 @@ export default function (pi) {
             const words = args.trim().split(/\s+/).filter(Boolean);
             const command = words[0] ?? "status";
             if (command === "setup") {
-                // Explicit, side-effect-free review. It intentionally does not probe or
-                // measure quotas: those stages are opt-in and must never run at import.
+                // Explicit, side-effect-free review. It intentionally does not probe,
+                // measure quotas, or fetch benchmarks: those are separate opt-in
+                // commands and must never run at import, session start, or review.
                 const probeCache = readProbeCache();
                 const installedExtensions = detectWebAccessExtensions(pi.getAllTools());
-                const setupOptions = { installedExtensions, ...(probeCache ? { probes: probeCache } : {}) };
-                const plan = buildSetupPlan(ctx.modelRegistry, setupOptions);
+                // Only exact identities in the current live authenticated registry can
+                // carry evidence; cached records are revalidated against it every time.
+                const knownModels = discoverSetupCandidates(ctx.modelRegistry).map((candidate) => candidate.identity);
+                const evidence = revalidateBenchmarkCache(readBenchmarkCache(), { knownModels });
+                const plan = buildSetupPlan(ctx.modelRegistry, {
+                    installedExtensions,
+                    evidence: evidence.records,
+                    ...(probeCache ? { probes: probeCache } : {}),
+                });
                 const generated = setupConfig(plan);
+                const measured = plan.candidates.filter((candidate) => (candidate.benchmarks?.length ?? 0) > 0).length;
+                const unmeasured = plan.candidates.length - measured;
                 const ids = plan.candidates.map((candidate) => modelKey(candidate.identity)).join(", ") || "none";
-                const review = `setup review: ${plan.candidates.length} configured Pi models: ${ids}. ${plan.reasons.join("; ") || "All candidates are unmeasured; no probe or benchmark evidence was invented."}`;
+                const ignored = evidence.diagnostics.length > 0 ? ` ${evidence.diagnostics.length} cached record diagnostic(s) ignored.` : "";
+                const review = `setup review: ${plan.candidates.length} configured Pi models (${measured} measured, ${unmeasured} unmeasured): ${ids}.${ignored} ${plan.reasons.join("; ") || "No benchmark records were invented; unmeasured candidates stay reviewable."}`;
+                const commandHelp = "Commands: /delegateau setup probe (reachability), /delegateau setup import <file> (no network), /delegateau setup retrieve artificial-analysis <mapping-file> (explicit network), /delegateau setup apply. Limits: 8 records/model, HTTPS-only sources, records older than 730 days ignored.";
                 if (words[1] === "probe") {
                     const cache = await probeSetupPlan(plan, { cwd: probeWorkingDir() });
                     writeProbeCache(cache);
                     ctx.ui.notify(`pi-delegateau setup probe complete: ${cache.results.filter((r) => r.reachable).length}/${cache.results.length} reachable. Review results before applying; no project config was written.`, "info");
                     return;
                 }
+                if (words[1] === "import") {
+                    const target = words[2];
+                    if (!target) {
+                        ctx.ui.notify("Usage: /delegateau setup import <file>", "warning");
+                        return;
+                    }
+                    try {
+                        const result = await importBenchmarkFile(target, { knownModels });
+                        const diag = result.diagnostics.length > 0 ? ` ${result.diagnostics.length} ignored record diagnostic(s).` : "";
+                        const dropped = result.dropped > 0 ? ` ${result.dropped} record(s) were evicted by the per-model cap and were NOT stored.` : "";
+                        ctx.ui.notify(`pi-delegateau setup import: ${result.imported} record(s) read, ${result.retained} stored for live identities.${dropped}${diag} Cache: ${benchmarkCachePath()}. No network request was made.`, "info");
+                    }
+                    catch (error) {
+                        ctx.ui.notify(`pi-delegateau setup import failed: ${sanitizeError(error instanceof Error ? error.message : String(error))}`, "warning");
+                    }
+                    return;
+                }
+                if (words[1] === "retrieve") {
+                    const source = words[2];
+                    const mappingFile = words[3];
+                    if (source !== ARTIFICIAL_ANALYSIS_SOURCE) {
+                        ctx.ui.notify(`pi-delegateau setup retrieve: unsupported source "${source ?? ""}". Supported adapters: ${ARTIFICIAL_ANALYSIS_SOURCE}.`, "warning");
+                        return;
+                    }
+                    if (!mappingFile) {
+                        ctx.ui.notify("Usage: /delegateau setup retrieve artificial-analysis <mapping-file>", "warning");
+                        return;
+                    }
+                    let mapping;
+                    try {
+                        mapping = parseSourceModelMap(JSON.parse(fs.readFileSync(mappingFile, "utf8")));
+                    }
+                    catch (error) {
+                        ctx.ui.notify(`pi-delegateau setup retrieve: invalid mapping (${sanitizeError(error instanceof Error ? error.message : String(error))})`, "warning");
+                        return;
+                    }
+                    const credential = process.env[ARTIFICIAL_ANALYSIS_API_KEY_ENV];
+                    if (!credential) {
+                        // No credential means no request and no cache write: the source is
+                        // unavailable, and candidates stay visibly unmeasured.
+                        ctx.ui.notify(`pi-delegateau setup retrieve: ${ARTIFICIAL_ANALYSIS_API_KEY_ENV} is absent from the process environment; no request was made, nothing was measured, and no cache was written.`, "warning");
+                        return;
+                    }
+                    const report = await retrieveArtificialAnalysis({ mapping: mapping.mappings, knownModels, credential });
+                    if (report.records.length === 0) {
+                        // A failed or empty retrieval must not mutate the cache: no new
+                        // evidence exists and a stale snapshot must not be rewritten.
+                        const diag = report.diagnostics.length > 0 ? ` ${report.diagnostics.length} ignored record diagnostic(s).` : "";
+                        ctx.ui.notify(`pi-delegateau setup retrieve: no records normalized from ${ARTIFICIAL_ANALYSIS_SOURCE}; no cache was written.${diag}`, "warning");
+                        return;
+                    }
+                    const cache = mergeBenchmarkReport(readBenchmarkCache(), report, { knownModels });
+                    writeBenchmarkCache(cache);
+                    const keys = new Set(cache.records.map(benchmarkRecordKey));
+                    const stored = report.records.filter((entry) => keys.has(benchmarkRecordKey(entry))).length;
+                    const evicted = report.records.length - stored;
+                    const diag = report.diagnostics.length > 0 ? ` ${report.diagnostics.length} ignored record diagnostic(s).` : "";
+                    const evictText = evicted > 0 ? ` ${evicted} record(s) were evicted by the per-model cap and were NOT stored.` : "";
+                    ctx.ui.notify(`pi-delegateau setup retrieve: ${report.records.length} record(s) normalized from ${ARTIFICIAL_ANALYSIS_SOURCE}, ${stored} stored (attribution: https://artificialanalysis.ai/).${evictText}${diag} Cache: ${benchmarkCachePath()}.`, report.records.length > 0 ? "info" : "warning");
+                    return;
+                }
                 if (words[1] !== "apply") {
-                    ctx.ui.notify(`pi-delegateau ${review} Run /delegateau setup probe for an explicit sequential reachability stage, or /delegateau setup apply to request a confirmed write.`, "info");
+                    ctx.ui.notify(`pi-delegateau ${review} ${commandHelp}`, "info");
                     return;
                 }
                 const configPath = path.join(ctx.cwd, CONFIG_FILE_NAME);
@@ -384,7 +483,8 @@ export default function (pi) {
                 ctx.ui.notify(written ? `pi-delegateau setup wrote ${written}` : "pi-delegateau setup not confirmed; no config was written.", written ? "info" : "warning");
                 return;
             }
-            const config = loadConfig(ctx.cwd);
+            const resolved = resolveConfig({ cwd: ctx.cwd });
+            const config = resolved.config;
             mode.setAllowedTools("delegate-execution", config.allowedParentTools.delegateExecution);
             mode.setAllowedTools("coordinator-only", config.allowedParentTools.coordinatorOnly);
             admission.configure(config.limits.concurrency, config.limits.maxQueueDepth);
@@ -395,7 +495,18 @@ export default function (pi) {
                 const blockedReasons = pool.blockedReasons.length > 0 ? ` (${pool.blockedReasons.join("; ")})` : "";
                 const busyText = `, slots=${pool.occupied}/${pool.concurrency} running=${pool.running} blocked=${pool.blocked}${blockedReasons}, queue=${pool.queued}/${pool.maxQueueDepth}`;
                 const shadowText = shadowedDelegateTaskCalls ? ", tool-shadowing=suspected (delegate_task resolved outside this extension; check for a competing extension)" : "";
-                ctx.ui.notify(`${statusText(config, mode.current())}, delegation decision=${config.delegationDecision}${decisionText}${busyText}${shadowText}`, "info");
+                const health = new HealthStore({ cwd: ctx.cwd, config: config.health });
+                const openCircuits = health.openCircuits();
+                // Open circuits and dead trial claims are reported separately: a circuit
+                // hides itself from nothing, but a stranded claim is neither open nor
+                // healthy and would otherwise leave a model silently unusable.
+                const expiredTrials = openCircuits.filter((entry) => entry.trialExpired === true);
+                const openOnly = openCircuits.filter((entry) => entry.trialExpired !== true);
+                const healthText = `, health=${openOnly.length} open circuit${openOnly.length === 1 ? "" : "s"}${openOnly.length > 0 ? ` (${openOnly.slice(0, 3).map((entry) => `${entry.model}: ${entry.category ?? "unknown"} until ${entry.openUntil ?? "unknown"}`).join("; ")}${openOnly.length > 3 ? `; +${openOnly.length - 3} more` : ""})` : ""}${expiredTrials.length > 0 ? `, ${expiredTrials.length} stale trial claim${expiredTrials.length === 1 ? "" : "s"} cleared (${expiredTrials.slice(0, 3).map((entry) => entry.model).join("; ")})` : ""}`;
+                const measuredCandidates = config.candidates.filter((candidate) => (candidate.benchmarks?.length ?? 0) > 0).length;
+                const benchmarkText = `, benchmarks=${measuredCandidates}/${config.candidates.length} candidates measured`;
+                const sourceText = `, config=${resolved.source}${resolved.path ? ` (${resolved.path})` : ""}`;
+                ctx.ui.notify(`${statusText(config, mode.current())}, delegation decision=${config.delegationDecision}${decisionText}${busyText}${healthText}${benchmarkText}${sourceText}${shadowText}`, "info");
                 return;
             }
             if (command === "override" || ["local", "delegate", "manual"].includes(command)) {
@@ -499,7 +610,7 @@ export default function (pi) {
             const jevChoose = config.selection === "jev" && config.allowExternalSensing
                 ? (input) => new JevSelector(quotaSelectorOptions(config.limits.selectionDeadlineMs, config.costMode)).choose(input)
                 : undefined;
-            decision = await gate.ensure(buildGateInput(config, mode, ctx, event.prompt, jevChoose), selector);
+            decision = await gate.ensure(buildGateInput(config, mode, ctx, event.prompt, jevChoose, new HealthStore({ cwd: ctx.cwd, config: config.health })), selector);
         }
         catch (error) {
             ctx.ui.notify(`pi-delegateau: delegation gate failed (${sanitizeError(error instanceof Error ? error.message : String(error))}); ${config.delegationDecision === "jev-enforce" ? "protected execution is blocked for this request" : "continuing in manual mode"}`, "warning");
@@ -545,7 +656,7 @@ export default function (pi) {
             const jevChoose = config.selection === "jev" && config.allowExternalSensing
                 ? (input) => new JevSelector(quotaSelectorOptions(config.limits.selectionDeadlineMs, config.costMode)).choose(input)
                 : undefined;
-            const decision = await gate.ensure(buildGateInput(config, mode, ctx, event.text ?? "", jevChoose), selector);
+            const decision = await gate.ensure(buildGateInput(config, mode, ctx, event.text ?? "", jevChoose, new HealthStore({ cwd: ctx.cwd, config: config.health })), selector);
             mode.setRequestRestriction(decision.restriction);
             await writeDecisionReceipt(config, decision, "decision", (message) => ctx.ui.notify(message, "warning"));
         }

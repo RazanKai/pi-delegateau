@@ -38,12 +38,32 @@ describe("explicit onboarding", () => {
       { identity: { provider: "p", id: "strong" }, description: "", capabilities: [], provenance: "built-in", cost: { input: 1 }, contextWindow: 20, accessMode: "default", state: "unmeasured" },
     ];
     const evidence: BenchmarkEvidence[] = [
-      { model: base[0].identity, source: "x", benchmark: "bench", version: "1", date: "2026-01-01", provenance: "independent", score: 1 },
-      { model: base[1].identity, source: "x", benchmark: "bench", version: "1", date: "2026-01-01", provenance: "independent", score: 2 },
+      { model: base[0].identity, source: "x", sourceUrl: "https://example.test/", benchmark: "bench", version: "1", metric: "coding", date: "2026-01-01", dateKind: "source-reported", provenance: "independent", score: 1, unit: "percent", direction: "higher-is-better" },
+      { model: base[1].identity, source: "x", sourceUrl: "https://example.test/", benchmark: "bench", version: "1", metric: "coding", date: "2026-01-01", dateKind: "source-reported", provenance: "independent", score: 2, unit: "percent", direction: "higher-is-better" },
     ];
     expect(pruneSetupCandidates(base, evidence).candidates.map((x) => x.identity.id)).toEqual(["strong"]);
     evidence[1]!.version = "2";
     expect(pruneSetupCandidates(base, evidence).candidates).toHaveLength(2);
+  });
+  it("preserves every normalized record through setup config and requires dominance on every measured metric", () => {
+    const base: any[] = [
+      { identity: { provider: "p", id: "weak" }, description: "", capabilities: [], provenance: "built-in", cost: { input: 2 }, contextWindow: 10, accessMode: "token", accessDecision: "default", state: "unmeasured" },
+      { identity: { provider: "p", id: "strong" }, description: "", capabilities: [], provenance: "built-in", cost: { input: 1 }, contextWindow: 20, accessMode: "token", accessDecision: "default", state: "unmeasured" },
+    ];
+    const make = (model: any, metric: string, score: number): BenchmarkEvidence => ({
+      model, source: "official", sourceUrl: "https://example.test/leaderboard", benchmark: "bench", version: "2026-01", metric,
+      date: "2026-01-02", dateKind: "source-reported", provenance: "independent", score, unit: "percent", direction: "higher-is-better",
+    });
+    const weak = [make(base[0].identity, "coding", 60), make(base[0].identity, "reasoning", 80)];
+    const partialStrong = [make(base[1].identity, "coding", 70)];
+    expect(pruneSetupCandidates(base, [...weak, ...partialStrong]).candidates).toHaveLength(2);
+
+    const all = [...weak, ...partialStrong, make(base[1].identity, "reasoning", 81)];
+    const pruned = pruneSetupCandidates(base, all);
+    expect(pruned.candidates.map((candidate) => candidate.identity.id)).toEqual(["strong"]);
+    expect(pruned.candidates[0]!.benchmarks).toHaveLength(2);
+    const parsed = parseConfig(setupConfig({ candidates: pruned.candidates, agents: {}, reasons: [] }));
+    expect(parsed.candidates[0]!.benchmarks).toEqual(pruned.candidates[0]!.benchmarks);
   });
   it("supports either web extension", () => {
     const missing = roleTemplates([]);

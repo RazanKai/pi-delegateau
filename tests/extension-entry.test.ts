@@ -83,6 +83,8 @@ process.stdout.write(JSON.stringify({type:"message_end",message:{role:"assistant
       piCommand: fakePi,
       receiptPath: receipts,
       decisionReceiptPath: decisions,
+      // Keep health state in the disposable workspace, never the real agent dir.
+      health: { path: join(cwd, "health.json") },
     }), "utf8");
 
     try {
@@ -107,6 +109,19 @@ process.stdout.write(JSON.stringify({type:"message_end",message:{role:"assistant
       expect(JSON.stringify(result)).toContain("child completed");
       const dispatchReceipt = JSON.parse((await readFile(receipts, "utf8")).trim());
       expect(dispatchReceipt).toMatchObject({ outcome: "success", decisionId: expect.any(String) });
+      // The structured route trace rides along the existing receipt path and
+      // must never carry the task text.
+      expect(dispatchReceipt.routeTrace).toMatchObject({
+        dispatchId: dispatchReceipt.dispatchId,
+        decisionId: dispatchReceipt.decisionId,
+        agent: "worker",
+        selectionSource: "fixed",
+        selectedModel: "fake/child-model",
+        appliedModel: "fake/child-model",
+        outcome: "success",
+        candidateIds: ["fake/child-model"],
+      });
+      expect(JSON.stringify(dispatchReceipt.routeTrace)).not.toContain("SECRET_TASK");
       const decisionLines = (await readFile(decisions, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
       expect(decisionLines.at(-1)).toMatchObject({ outcome: "delegated", execution: "delegated" });
     } finally {
@@ -146,6 +161,7 @@ if (task === "A" || task === "B") {
       limits: { concurrency: 2, maxQueueDepth: 2 },
       piCommand: fakePi,
       receiptPath: receipts,
+      health: { path: join(cwd, "health.json") },
     }), "utf8");
 
     try {

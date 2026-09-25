@@ -1,6 +1,7 @@
 import { type CostModeConfig } from "./quota.js";
 import { type ProbeCache, type ProbeResult } from "./reachability.js";
-import type { CandidateProfile, ModelIdentity } from "./types.js";
+import type { BenchmarkEvidence, CandidateProfile } from "./types.js";
+export type { BenchmarkEvidence } from "./types.js";
 export interface RegistryForSetup {
     getAvailable(): readonly RegistrySetupModel[];
     hasConfiguredAuth(model: RegistrySetupModel): boolean;
@@ -19,20 +20,10 @@ export interface RegistrySetupModel {
     };
     latencyMs?: number;
 }
-export interface BenchmarkEvidence {
-    model: ModelIdentity;
-    source: string;
-    benchmark: string;
-    version: string;
-    date: string;
-    provenance: "provider" | "independent";
-    score?: number;
-}
 export interface SetupCandidate extends CandidateProfile {
     probe?: ProbeResult;
     accessMode: "token" | "quota-gpu-time";
     accessDecision: string;
-    benchmark?: BenchmarkEvidence;
     state: "unmeasured" | "reachable" | "unreachable";
 }
 export interface SetupPlan {
@@ -43,7 +34,7 @@ export interface SetupPlan {
 export declare function detectWebAccessExtensions(tools: readonly unknown[]): string[];
 /** Discover only models Pi currently exposes AND says have configured auth. */
 export declare function discoverSetupCandidates(registry: RegistryForSetup, costMode?: CostModeConfig): SetupCandidate[];
-/** Only comparable evidence (same source, benchmark and version) can prove dominance. */
+/** Only identical source/benchmark/version/metric/unit/direction records are comparable. */
 export declare function pruneSetupCandidates(candidates: SetupCandidate[], evidence?: BenchmarkEvidence[], probes?: ProbeCache): {
     candidates: SetupCandidate[];
     reasons: string[];

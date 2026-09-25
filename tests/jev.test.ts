@@ -47,6 +47,38 @@ describe("JevSelector", () => {
     expect(JSON.stringify(request)).toContain("TASK DATA");
   });
 
+  it("sends structured bounded benchmark records and concise source facts to Jev", async () => {
+    const systemOne = vi.fn().mockResolvedValue({ answers: { selected_model: { choice: "alpha/fast-1" } } });
+    const measured: CandidateProfile[] = profiles.map((profile, index) => index === 0 ? {
+      ...profile,
+      benchmarks: [{
+        model: profile.identity,
+        source: "livebench-official",
+        sourceUrl: "https://livebench.github.io/",
+        benchmark: "LiveBench",
+        version: "2026-01-08",
+        metric: "coding-average",
+        date: "2026-01-08",
+        dateKind: "source-reported",
+        provenance: "independent",
+        score: 72.5,
+        unit: "percent",
+        direction: "higher-is-better",
+      }],
+    } : profile);
+    const selector = new JevSelector({ client: { systemOne }, timeoutMs: 100 });
+    await selector.choose({
+      question: "Which model fits?",
+      candidateIds: ["alpha/fast-1", "beta/strong-1"],
+      state: { task: "t", preference: "quality", agent: { name: "w", instructions: "i", tools: [] }, candidates: measured },
+    });
+    const request = systemOne.mock.calls[0]![0] as any;
+    expect(request.questions.selected_model.criteria["alpha/fast-1"]).toContain("LiveBench@2026-01-08 coding-average=72.5 percent");
+    expect(request.questions.selected_model.criteria["alpha/fast-1"]).toContain("independent, 2026-01-08 source-reported, livebench-official");
+    expect(request.state.candidates[0].benchmarks).toEqual(measured[0]!.benchmarks);
+    expect(request.state.candidates[1].benchmarks).toBeUndefined();
+  });
+
   it("passes live headroom to Jev instead of making quota a hidden preference", async () => {
     const systemOne = vi.fn().mockResolvedValue({ answers: { selected_model: { choice: "beta/strong-1" } } });
     const selector = new JevSelector({
@@ -130,6 +162,7 @@ describe("JevSelector", () => {
     const selector = new JevDelegationSelector({ client: { systemOne }, timeoutMs: 100 });
     const answer = await selector.choose({
       question: "Which path?",
+      complexityQuestion: "Is this work local or delegated?",
       state: {
         prompt: "implement TASK",
         parent: { provider: "parent", id: "model", capabilities: ["code"] },

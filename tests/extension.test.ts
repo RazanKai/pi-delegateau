@@ -1,3 +1,7 @@
+import { mkdtempSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import extension from "../src/index.js";
 
@@ -18,6 +22,12 @@ describe("Pi extension entry point", () => {
     };
     extension(pi);
 
+    // This test asserts BUILT-IN defaults, so it must not see an ambient global
+    // config in the operator's agent dir. Point the agent dir at an empty temp
+    // dir for the duration of the assertion.
+    const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-delegateau-defaults-"));
+    try {
     expect(tools.map((tool) => tool.name)).toContain("delegate_task");
     expect(commands.has("delegateau")).toBe(true);
     const ctx = { cwd: "/tmp", ui: { setStatus: () => undefined, notify: (text: string) => notifications.push(text) } };
@@ -32,16 +42,30 @@ describe("Pi extension entry point", () => {
     expect(notifications.at(-1)).toContain("coordinator-only");
     await commands.get("delegateau").handler("disable", ctx);
     expect(activeTools).toEqual(["read", "write", "bash"]);
+    } finally {
+      if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+    }
   });
 
   it("reviews first-use setup without writing until confirmation", async () => {
     const commands = new Map<string, any>(); const notifications: string[] = [];
     extension({ registerTool: () => undefined, registerCommand: (n: string, c: any) => commands.set(n, c), on: () => undefined, getActiveTools: () => [], setActiveTools: () => undefined, getAllTools: () => [] } as any);
     const ctx = { cwd: "/tmp", modelRegistry: { getAvailable: () => [{ provider: "live", id: "exact", contextWindow: 10 }], hasConfiguredAuth: () => true }, ui: { notify: (x: string) => notifications.push(x), confirm: async () => false } };
-    await commands.get("delegateau").handler("setup", ctx);
-    expect(notifications.at(-1)).toMatch(/1 configured Pi models: live\/exact/);
-    await commands.get("delegateau").handler("setup apply", ctx);
-    expect(notifications.at(-1)).toMatch(/not confirmed; no config was written/);
+    // Isolate agent-state cache reads from the real user profile.
+    const priorAgentDir = process.env.PI_CODING_AGENT_DIR;
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-delegateau-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    try {
+      await commands.get("delegateau").handler("setup", ctx);
+      expect(notifications.at(-1)).toMatch(/1 configured Pi models \(0 measured, 1 unmeasured\): live\/exact/);
+      await commands.get("delegateau").handler("setup apply", ctx);
+      expect(notifications.at(-1)).toMatch(/not confirmed; no config was written/);
+    } finally {
+      if (priorAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = priorAgentDir;
+      await rm(agentDir, { recursive: true, force: true });
+    }
   });
 
   // F03 regression: delegation from an untrusted project is refused before
@@ -88,6 +112,8 @@ describe("Pi extension entry point", () => {
       piCommand: failing,
       receiptPath: join(directory, "receipts.jsonl"),
       decisionReceiptPath: join(directory, "decisions.jsonl"),
+      // Keep health state in the disposable workspace, never the real agent dir.
+      health: { path: join(directory, "health.json") },
     }), "utf8");
 
     const tools: any[] = [];

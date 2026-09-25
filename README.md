@@ -35,16 +35,79 @@ A fresh project can build its initial pool with:
 ```text
 /delegateau setup
 /delegateau setup probe
+/delegateau setup import <file>
+/delegateau setup retrieve artificial-analysis <mapping-file>
 /delegateau setup apply
 ```
 
 Setup reads Pi's live model registry, keeps models with configured credentials,
 preserves provider metadata, and requires confirmation before writing
-`.pi/delegateau.json`. For Ollama Cloud, `pi-ollama-cloud-link` supplies that
-catalog and the provider-owned quota snapshot; catalog presence confirms that the
-model is listed, not that a generation request will succeed. Reachability probing
-is sequential and explicit; quota measurement and external benchmark retrieval
-are separate opt-in stages.
+`.pi/delegateau.json`; replacing an existing config additionally requires a second
+explicit overwrite confirmation. For Ollama Cloud, `pi-ollama-cloud-link` supplies
+that catalog and the provider-owned quota snapshot; catalog presence confirms that
+the model is listed, not that a generation request will succeed. Reachability
+probing is sequential and explicit; quota measurement is a separate opt-in stage.
+
+## Configuration location
+
+delegateau resolves its config in this order:
+
+1. `<project>/.pi/delegateau.json` — the project config, when it exists.
+2. `<agent-dir>/delegateau.json` — the global config, applied in every project
+   that has no project config. The agent dir is `PI_CODING_AGENT_DIR`, else
+   `~/.pi/agent`, the same root the receipt paths use.
+3. Built-in defaults, when neither exists.
+
+A project config REPLACES the global one; it is not merged with it, so a project
+never runs on a half-global policy that no single file states. An unreadable file
+fails closed at whichever level it was found rather than silently falling back to
+defaults. `/delegateau status` reports which source is in effect:
+`config=global (/home/user/.pi/agent/delegateau.json)`.
+
+Benchmark evidence is acquired only by an explicit command. `setup import` reads a
+local structured JSON document and makes no network request. `setup retrieve
+artificial-analysis` is the one supported network adapter: it calls Artificial
+Analysis's authenticated v2 Free-tier language-model endpoint
+(`https://artificialanalysis.ai/api/v2/language/models/free`) with
+`ARTIFICIAL_ANALYSIS_API_KEY` from the process environment, and it requires a
+mapping from each stable Artificial Analysis model `id` to an exact live Pi
+`provider/model` identity — it never infers an alias from a model name or a loose
+slug similarity. That mapping is a reviewable JSON file; `scripts/build-aa-mapping.py`
+produces it from live sources (`pi --list-models` plus the AA catalog) and emits a
+pair only when exactly one AA entry matches a Pi model after documented
+canonicalization, omitting anything ambiguous so those models stay visibly
+unmeasured:
+```text
+ARTIFICIAL_ANALYSIS_API_KEY=... python3 scripts/build-aa-mapping.py aa-mapping.json
+```
+That request is sent only to `artificialanalysis.ai` and redirects are refused, so
+the credential is never replayed to another host. Normalized records are bounded
+(at most 8 per model, HTTPS sources only, records older than 730 days ignored —
+enforced for records imported, retrieved **and** hand-written into a config) and
+cached under the Pi agent state area
+(`<agentDir>/delegateau/benchmarks.json`), outside the project config. Each
+explicit retrieval call is also deadline- and byte-bounded (a hung transport or
+body, or an oversize body, yields a sanitized diagnostic and writes no cache),
+and the adapter promotes only the documented Free-tier composite indices
+(Intelligence, Coding and Agentic Index); any other numeric `evaluations` field
+becomes a bounded unsupported diagnostic. Values the record parser would reject —
+an over-long version label, an out-of-range score — are normalized or reported at
+acquisition time rather than stored and discarded on the next read. Every record
+states whether its date is a source-reported measurement or an adapter retrieval
+snapshot (`dateKind`).
+Records are revalidated against the current live authenticated registry at every
+review, and prior cache entries are revalidated before a merge applies the
+per-model cap — freshly acquired records are placed first, so the cap evicts the
+oldest evidence rather than the record just acquired, and every eviction is
+reported. Malformed, stale, future-dated, unmatched or untrusted input stays
+visibly unmeasured rather than being attached to a candidate. Import,
+extension load, session start, ordinary setup review and dispatch never fetch
+benchmark data.
+Measured records are carried through the generated config into `CandidateProfile`,
+into Jev's Choice criteria and candidate state, and into the bounded sanitized
+route trace on each dispatch receipt (with an explicit `offeredToJev` flag, the
+count actually offered, and a `truncated` flag when the trace's own cap clipped
+the stored list); missing evidence never penalizes an unmeasured candidate.
 
 The built-in role templates are:
 

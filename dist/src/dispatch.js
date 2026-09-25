@@ -1,15 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { AdmissionError } from "./admission.js";
+import { collectBenchmarkEvidence } from "./benchmarks.js";
 import { resolveChildExtensions, validateProbedChildTools } from "./child-extensions.js";
 import { CHILD_TOOLS } from "./config.js";
+import { resolveEligibleCandidates } from "./eligibility.js";
+import { classifyChildHealth } from "./health.js";
+import { HealthStore } from "./health-store.js";
 import { JevSelector } from "./jev.js";
 import { quotaSelectorOptions } from "./selector-options.js";
-import { filterCandidatesByQuota, readQuotaState } from "./quota.js";
-import { isKnownUnreachable, readProbeCache } from "./reachability.js";
-import { resolveCandidateData } from "./live-data.js";
+import { readQuotaState } from "./quota.js";
 import { PiProcessSpawner, probePiExtensionTools } from "./pi-process.js";
 import { appendReceipt, defaultReceiptPath } from "./receipt-store.js";
 import { buildReceipt, dispatchSummary, sanitizeError } from "./receipts.js";
+import { buildRouteTrace, mergeExcludedCandidates } from "./route-trace.js";
 import { ChildRunner } from "./runner.js";
 import { selectModel } from "./selection.js";
 import { modelKey } from "./types.js";
@@ -19,60 +22,6 @@ export class DispatchFailure extends Error {
         super(payload.text);
         this.payload = payload;
         this.name = "DispatchFailure";
-    }
-}
-function eligibleCandidates(config, agent, ctx, quotaState) {
-    return filterCandidatesByQuota(config.candidates
-        .filter((candidate) => {
-        const model = ctx.modelRegistry.find(candidate.identity.provider, candidate.identity.id);
-        if (!model || !ctx.modelRegistry.hasConfiguredAuth(model))
-            return false;
-        if (agent.tools.includes("delegate_task"))
-            return false;
-        // Exclusion happens HERE, before the chooser is asked: a model the
-        // provider will refuse must not consume a decision or a dispatch.
-        if (probeExcludes(candidate.identity))
-            return false;
-        return true;
-    })
-        // Enrich each eligible candidate with the provider's own published facts.
-        // Without this the chooser sees only a prose description and a hand-written
-        // price — measured wrong for 9 of 12 candidates, one by 20x — so it routes
-        // on invented numbers.
-        .map((candidate) => applyLiveData(candidate, ctx)), quotaState);
-}
-/** Overlay provider-registered cost/limits onto a configured candidate. */
-function applyLiveData(candidate, ctx) {
-    try {
-        const data = resolveCandidateData(candidate.identity, candidate, ctx.modelRegistry);
-        return {
-            ...candidate,
-            ...(data.cost ? { cost: data.cost } : {}),
-            costSource: data.costSource,
-            ...(data.contextWindow !== undefined ? { contextWindow: data.contextWindow } : {}),
-            ...(data.maxOutputTokens !== undefined ? { maxOutputTokens: data.maxOutputTokens } : {}),
-            ...(data.reasoning !== undefined ? { reasoning: data.reasoning } : {}),
-            ...(data.inputModalities ? { inputModalities: data.inputModalities } : {}),
-        };
-    }
-    catch {
-        // Provider data is an enhancement, never a launch prerequisite: a registry
-        // that misbehaves must degrade to the configured profile, not fail dispatch.
-        return candidate;
-    }
-}
-/**
- * Whether the last reachability probe found this model unserved. Reading the
- * cache is synchronous and cheap, so this runs on the dispatch path without
- * adding latency. A model with no probe entry is treated as reachable — absence
- * of evidence must not silently shrink the pool.
- */
-function probeExcludes(identity) {
-    try {
-        return isKnownUnreachable(identity, readProbeCache());
-    }
-    catch {
-        return false;
     }
 }
 function profileVersion(config) {
@@ -92,18 +41,96 @@ function update(options, dispatchId, status, text, details = {}) {
 export async function executeDispatch(options) {
     const { config, agent, assignment, ctx, pool } = options;
     const dispatchId = randomUUID();
+    const startedAt = new Date().toISOString();
     const controller = new AbortController();
     const forwardAbort = () => controller.abort();
     if (options.signal?.aborted)
         controller.abort();
     options.signal?.addEventListener("abort", forwardAbort, { once: true });
     options.registerController(controller);
+    // One store per dispatch unless the caller shares one (batch calls do). The
+    // default resolves the persisted file under the Pi agent state area.
+    const health = options.health ?? new HealthStore({ cwd: ctx.cwd, config: config.health });
     let selectedIdentity;
     let selectedSource;
+    let selection;
+    let childResult;
     let eligibleIds = [];
+    let preExcluded = [];
+    let revalidationExcluded = [];
+    let benchmarkEvidence = [];
+    let benchmarksOfferedToJev = false;
     let receiptAttempted = false;
     let blockedReason;
     let lease;
+    let trialClaimed = false;
+    let healthCategory;
+    const traceFor = (outcome) => buildRouteTrace({
+        dispatchId,
+        ...(options.decisionId ? { decisionId: options.decisionId } : {}),
+        agent: agent.name,
+        startedAt,
+        endedAt: new Date().toISOString(),
+        candidateIds: eligibleIds,
+        excluded: mergeExcludedCandidates(preExcluded, revalidationExcluded),
+        selectionSource: selectedSource ?? "unselected",
+        ...(selectedIdentity ? { requestedModel: modelKey(selectedIdentity) } : {}),
+        ...(selectedIdentity ? { selectedModel: modelKey(selectedIdentity) } : {}),
+        ...(childResult ? { appliedModel: modelKey(childResult.appliedModel) } : {}),
+        ...(childResult?.servedModel ? { servedModel: modelKey(childResult.servedModel) } : {}),
+        ...(selection ? {
+            jev: {
+                ...(selection.chooserLatencyMs !== undefined ? { latencyMs: selection.chooserLatencyMs } : {}),
+                ...(selection.confidence !== undefined ? { confidence: selection.confidence } : {}),
+                ...(selection.probabilities ? { probabilities: selection.probabilities } : {}),
+            },
+        } : {}),
+        ...(benchmarkEvidence.length > 0 || benchmarksOfferedToJev ? { benchmarkEvidence, benchmarksOfferedToJev } : {}),
+        outcome,
+        ...(healthCategory ? { errorCategory: healthCategory } : {}),
+    });
+    /**
+     * Attribute a finished child to model health. The APPLIED model owns the
+     * outcome, so a provider substitution does not blame the requested identity;
+     * a trial claimed on the requested model is released first. Nothing is
+     * recorded before the child started, and cancellation/task-failure/cleanup
+     * never count (see health.ts).
+     */
+    const recordChildHealth = (result) => {
+        const appliedKey = modelKey(result.appliedModel);
+        const selectedKey = selectedIdentity ? modelKey(selectedIdentity) : appliedKey;
+        const verdict = classifyChildHealth({
+            status: result.status,
+            ...(result.error ? { error: result.error } : {}),
+            ...(result.processStarted !== undefined ? { processStarted: result.processStarted } : {}),
+            observedExit: result.observedExit,
+            ...(result.groupCleaned !== undefined ? { groupCleaned: result.groupCleaned } : {}),
+        });
+        if (verdict.kind !== "success")
+            healthCategory = verdict.category;
+        if (!result.processStarted) {
+            if (trialClaimed)
+                health.abandonTrial(selectedKey);
+            trialClaimed = false;
+            return;
+        }
+        if (trialClaimed && appliedKey !== selectedKey) {
+            // Substitution: release the requested identity's untested trial and
+            // attribute the serving outcome to the model that actually ran.
+            health.abandonTrial(selectedKey);
+            trialClaimed = false;
+        }
+        if (verdict.kind === "success") {
+            health.recordSuccess(appliedKey);
+        }
+        else if (verdict.kind === "failure") {
+            health.recordFailure(appliedKey, verdict.category);
+        }
+        else if (trialClaimed) {
+            health.abandonTrial(selectedKey);
+        }
+        trialClaimed = false;
+    };
     try {
         lease = await pool.acquire(dispatchId, {
             signal: controller.signal,
@@ -125,8 +152,13 @@ export async function executeDispatch(options) {
             : [];
         const tools = validateProbedChildTools(agent.tools, resolvedExtensions.paths, probed);
         const quotaState = readQuotaState();
-        const candidates = eligibleCandidates(config, agent, ctx, quotaState);
+        const eligible = resolveEligibleCandidates({ config, agent, ctx, quotaState, health, enrich: true });
+        const candidates = eligible.candidates;
         eligibleIds = candidates.map((candidate) => modelKey(candidate.identity));
+        preExcluded = eligible.excluded;
+        // Capture the exact records the chooser can see before selection so the
+        // receipt proves what was (or was not) offered to it.
+        benchmarkEvidence = collectBenchmarkEvidence(candidates);
         const request = {
             agent,
             task: assignment.task,
@@ -143,16 +175,31 @@ export async function executeDispatch(options) {
             allowExternalSensing: config.allowExternalSensing,
             selectionDeadlineMs: config.limits.selectionDeadlineMs,
         };
-        const selection = await selectModel(request, {
+        selection = await selectModel(request, {
             choose: (input) => new JevSelector(quotaSelectorOptions(config.limits.selectionDeadlineMs, config.costMode, quotaState)).choose(input),
             signal: controller.signal,
         });
         selectedIdentity = selection.identity;
         selectedSource = selection.source;
-        const revalidated = eligibleCandidates(config, agent, ctx, readQuotaState());
-        if (!revalidated.some((candidate) => modelKey(candidate.identity) === modelKey(selection.identity))) {
+        // `jev` and `fallback` both mean the model chooser actually ran; `fixed`,
+        // `pin` and `single-candidate` never sent the records anywhere.
+        benchmarksOfferedToJev = selection.source === "jev" || selection.source === "fallback";
+        const revalidated = resolveEligibleCandidates({ config, agent, ctx, quotaState: readQuotaState(), health, enrich: false });
+        revalidationExcluded = revalidated.excluded;
+        if (!revalidated.candidates.some((candidate) => modelKey(candidate.identity) === modelKey(selection.identity))) {
             throw new Error(`Selected model ${modelKey(selection.identity)} is no longer eligible`);
         }
+        // Claim the one half-open recovery trial immediately before launch. A
+        // concurrent dispatch that owns the trial means this one must not launch.
+        const selectedKey = modelKey(selection.identity);
+        const claim = health.tryClaimTrial(selectedKey);
+        if (!claim.allowed) {
+            throw new DispatchFailure({
+                text: `Dispatch ${dispatchId}: launch-error\nSelected model ${selectedKey} is already in a half-open recovery trial`,
+                details: { dispatchId, status: "launch-error", error: "trial-in-progress" },
+            });
+        }
+        trialClaimed = claim.claimed;
         update(options, dispatchId, "running", `${selection.source}: ${modelKey(selection.identity)}; child starting...`, { selection });
         const runner = new ChildRunner(new PiProcessSpawner({ ...(config.piCommand ? { command: config.piCommand } : {}) }));
         const result = await runner.run({
@@ -170,6 +217,8 @@ export async function executeDispatch(options) {
             maxTurns: config.limits.childMaxTurns,
             maxOutputChars: config.limits.childOutputChars,
         }, (text) => update(options, dispatchId, "running", text));
+        childResult = result;
+        recordChildHealth(result);
         receiptAttempted = true;
         if (result.processStarted && (!result.observedExit || result.groupCleaned === false)) {
             blockedReason = "child exit or process-group cleanup not observed; manual recovery required";
@@ -196,6 +245,7 @@ export async function executeDispatch(options) {
             ...(result.error ? { errorCategory: result.status } : {}),
             ...(result.groupCleaned !== undefined ? { groupCleaned: result.groupCleaned } : {}),
             ...(result.outputTruncated ? { outputTruncated: true } : {}),
+            routeTrace: traceFor(result.status),
         }, (message) => ctx.ui.notify(message, "warning"));
         const text = [
             `Dispatch ${dispatchId}: ${result.status}`,
@@ -224,10 +274,17 @@ export async function executeDispatch(options) {
         return { content: [{ type: "text", text }], details };
     }
     catch (error) {
+        // A trial claimed before the runner threw is released untested; a run that
+        // completed already released/consumed it inside recordChildHealth.
+        if (trialClaimed && selectedIdentity) {
+            health.abandonTrial(modelKey(selectedIdentity));
+            trialClaimed = false;
+        }
         const cancelled = controller.signal.aborted || (error instanceof AdmissionError && error.code === "cancelled");
         const message = sanitizeError(error instanceof Error ? error.message : String(error));
         if (!receiptAttempted) {
             receiptAttempted = true;
+            const outcome = cancelled ? "cancelled" : "launch-error";
             await writeSafeReceipt(config, {
                 dispatchId,
                 ...(options.decisionId ? { decisionId: options.decisionId } : {}),
@@ -237,8 +294,9 @@ export async function executeDispatch(options) {
                 preference: config.preference,
                 eligibleIds,
                 profileVersion: profileVersion(config),
-                outcome: cancelled ? "cancelled" : "launch-error",
+                outcome,
                 errorCategory: selectedIdentity ? "execution" : "selection",
+                routeTrace: traceFor(outcome),
             }, (receiptMessage) => ctx.ui.notify(receiptMessage, "warning"));
         }
         if (error instanceof DispatchFailure)

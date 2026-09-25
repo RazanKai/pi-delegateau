@@ -1,5 +1,54 @@
 # pi-delegateau work log
 
+## 2026-09-25 19:17 CEST — review-fix round, derived AA mapping, live credentialed retrieval
+
+- Independent final review of the uncommitted tree (delegated, own context) returned
+  seven blocking defects plus acceptance gaps. All seven are fixed here, each with a
+  regression that fails on the pre-fix tree and passes after:
+  1. **Stranded trial claim.** `trialActive` was independent of `openUntil`, so a Pi
+     killed mid-trial left `{openUntil, trialActive:true}` that `openCircuits` never
+     reported while every dispatch answered `trial-in-progress`. `HealthRecord` now
+     carries `trialClaimedAt`, `TRIAL_MAX_AGE_MS` bounds a claim, `isTrialClaimLive`
+     gates the failure-count multiplier, `openCircuits()` surfaces and clears dead
+     claims, and `tryClaimTrial` re-allows them.
+  2. **Empty child error opened the circuit.** A non-zero exit after a completed answer
+     arrives with `error` omitted; that was classified `provider-stream` (a counting
+     category) and opened the circuit at `failureThreshold:1`. An absent/empty message
+     is now `unknown` and does not count.
+  3. **Acquisition could emit records its own parser rejects.** The response version
+     label and score went through unchecked. `MAX_BENCHMARK_ABS_SCORE` and the version
+     bound are now shared by the parser and the adapter; acquisition normalizes or
+     reports, so a successful retrieval can never vanish on the next read.
+  4. **Fresh import crowded out by the per-model cap.** `mergeRecords` filled with
+     prior cache entries first and reported the import as imported. Ordering is now
+     newest-first, evictions are reported, and the commands report **retained** counts.
+  5. **Route trace capped silently.** `MAX_TRACE_BENCHMARKS` 64 raised to 512, and the
+     trace now carries `offeredCount` + `truncated` so a partial list is never read as
+     the whole one.
+  6. **Credential could follow a redirect.** The `x-api-key` request now refuses
+     redirects and is host-allow-listed to `artificialanalysis.ai`.
+  7. **Config-embedded records skipped the age rule.** `parseConfig(raw, now)` threads
+     the clock into `parseConfiguredBenchmarks`, so hand-written records obey the same
+     730-day rule as imported and retrieved ones.
+- **Mapping is derived, not hand-typed.** `scripts/build-aa-mapping.py` reads the live
+  `pi --list-models` registry and the live AA Free-tier catalog and emits a pair only
+  when exactly one AA entry matches a live Pi model after documented canonicalization
+  (case/punctuation stripped). Live result: 19 of 25 Pi identities mapped; the other 6
+  stay visibly unmeasured rather than being aliased. This is the file
+  `/delegateau setup retrieve artificial-analysis <mapping>` consumes.
+- **Credentialed retrieval ran live** (key from `ARTIFICIAL_ANALYSIS_API_KEY` in the
+  environment; never read into a prompt, log, or file): 51 bounded records across the
+  19 mapped identities, 100 bounded diagnostics, stored cache re-validated on read with
+  zero loss. A real `JevSelector.choose` call then received per-candidate benchmark
+  facts for 8 candidates, and the records reach the effective config
+  (`~/.pi/agent/delegateau.json`, backed up before the write). T22 is promoted to DONE.
+- Canonical `env -u TYPESAFE_API_KEY -u TYPESAFE_BASE_URL npm run check`: **27 files /
+  240 tests passed** (was 228). Red-on-base proof: with only the production changes
+  reverted in a scratch copy, the 15 fix-relevant tests fail.
+- Operational notes: the AA key was pasted into chat and should be rotated now that the
+  retrieval has run. The key stays in `~/.hermes/.env` and the derived mapping file is
+  `0600`; nothing credential-bearing is committed.
+
 ## 2026-09-19 03:49 CEST — M0/M1/M2/M3 implementation start
 
 - Read `SPEC.md`, `DEVPLAN.md`, and the empty `WORKLOG.md` before coding.
@@ -562,3 +611,254 @@ The two web-research roles now accept either installed `pi-web-access` or `donse
 select the available extension in generated child configuration, and remain unavailable
 when neither is present. The built artifact was smoke-tested with the installed donsetch
 package; both roles selected `donsetch` and no internal eligibility marker was serialized.
+
+## 2026-09-21 — stale per-model reachability expiry
+
+A real dispatch excluded `openai-codex/gpt-5.6-luna` despite live registry/auth readiness
+because its cached negative reachability result was more than a day old. The cache file's
+top-level timestamp could be fresh after merging while the individual result stayed stale;
+`isKnownUnreachable()` treated every negative entry as permanent.
+
+- `src/reachability.ts` now excludes a negative result only when that result's own
+  `probedAt` is valid, not future-dated, and younger than 24 hours. Stale, missing,
+  malformed, and future timestamps are treated as unprobed. Positive entries never exclude.
+- Added deterministic injected-clock tests for fresh, stale, exact-boundary, missing,
+  malformed, future-dated, and mixed-entry cases. `dist/` was rebuilt.
+- Red-on-base: the new freshness contracts failed against the pre-fix production source
+  (**6 failed / 12 passed**). Fixed tree: `env -u TYPESAFE_API_KEY -u TYPESAFE_BASE_URL npm run check`
+  passed (**18 test files / 158 tests**).
+- Live Pi dispatch after the fix succeeded with Jev selection; all **12/12** configured
+  candidates were eligible and `openai-codex/gpt-5.6-luna` was included in the chooser's
+  probability map.
+
+## 2026-09-21 — persistent runtime health circuits and safe route trace
+
+Implemented the requested reliability ideas without adopting any continuous
+parent-model switching. The parent model and conversation are never touched.
+
+- Added `src/health.ts`: pure circuit transitions with stable categories
+  (`unsupported-model`, `auth`, `quota`, `timeout`, `network`,
+  `provider-stream`, `launch`, `cancellation`, `task-failure`, `cleanup`,
+  `unknown`). Defaults are 3 failures / 5 minutes / 60 minutes; a half-open
+  trial failure reopens with bounded backoff (x2 capped at 16x). Cancellation,
+  ordinary task failure and cleanup failure never count. `classifyChildHealth`
+  only blames an applied model after the child actually started.
+- Added `src/health-store.ts`: atomic human-readable JSON under the Pi agent
+  state area (`<agentDir>/delegateau/health.json`) with an injectable io/clock
+  seam. Missing, corrupt or malformed state fails open; `enabled: false` is
+  fully transparent.
+- Added `src/eligibility.ts`: one candidate resolver shared by the gate and
+  dispatch, folding registry/auth, quota floor, reachability and the health
+  circuit together and returning excluded candidates with stable reasons.
+- Added `src/route-trace.ts`: bounded, structured trace (dispatch/decision IDs,
+  agent, candidate ids, excluded reasons, selection source,
+  requested/selected/applied/served model, Jev latency/confidence,
+  quota/reachability/health filter facts, outcome/error category, timestamps)
+  embedded in the existing receipt path. Its builder has no parameter for task,
+  prompt, context, output, repository contents, secrets or provider bodies.
+- Wired health at the real dispatch path: the circuit is filtered before Jev,
+  revalidated before launch, one half-open trial is claimed before spawn, and
+  the outcome is recorded against the APPLIED model while the receipt retains
+  requested and applied identities. `/delegateau status` now reports the open
+  circuit count with sanitized model/category/cooldown facts.
+- Reused the previously uncommitted reachability freshness behavior unchanged.
+
+### Commands and observed results
+
+```text
+$ npx vitest run tests/extension-entry-health.test.ts   # before the production fix
+Test Files  1 failed (1)
+Tests       2 failed (2)
+# expected launch-error on the first provider failure; no health file existed
+
+$ env -u TYPESAFE_API_KEY -u TYPESAFE_BASE_URL npm run check
+> npm run build && npm test
+Test Files  23 passed (23)
+Tests       194 passed (194)
+```
+
+- New behavioral coverage: `tests/health.test.ts`, `tests/health-store.test.ts`,
+  `tests/eligibility.test.ts`, `tests/route-trace.test.ts`, and
+  `tests/extension-entry-health.test.ts` (registered `delegate_task` path:
+  persistence + pre-Jev filtering, applied-model substitution, status surface).
+- Incomplete live evidence: no real provider-backed dispatch was run for this
+  change; the entry-path tests use a real spawned child executable fixture.
+  Reachability's 24-hour per-result freshness is unchanged and its pre-existing
+  live note above still applies.
+
+## 2026-09-21 — post-agent verification hardening
+
+- Independently reran `env -u TYPESAFE_API_KEY -u TYPESAFE_BASE_URL npm run check`:
+  **23 test files / 194 tests passed**; `git diff --check` is clean.
+- Corrected the child-health boundary: `timed-out` is delegateau's wall-clock
+  envelope and is therefore a task failure, not proof of a provider timeout.
+  Provider timeout evidence still uses the failed-result error category.
+- Shared the in-process `HealthStore` across dispatches with the same project and
+  health configuration, preventing concurrent parent calls from overwriting each
+  other's in-memory failure events before persistence.
+- Rebuilt `dist/` through the full check; focused health/eligibility/trace and
+  registered-entry tests pass (**5 files / 36 tests**).
+
+## 2026-09-24 — M10 / T22 benchmark-evidence pipeline
+
+Finished the uncommitted benchmark-evidence work in place (no clean tree). The
+feature adds an explicit, bounded, side-effect-free pipeline from acquisition to
+Jev and the receipt, and keeps every unknown visibly unmeasured.
+
+### What it does
+
+- **Normalized record:** one `BenchmarkEvidence` shape (exact `provider/model`,
+source id, HTTPS URL, benchmark, version, metric, observation date,
+provider/independent provenance, finite score, unit, direction).
+`normalizeBenchmarkDocument` validates length/count/date/URL bounds, exact-dedupes,
+preserves unlike metrics/versions, and emits only bounded category diagnostics
+(`malformed`, `stale`, `future-dated`, `unmatched-model`, `unsafe-source-url`,
+`limit-exceeded`, `source-unavailable`).
+- **Agent-state cache, not policy config:** validated results persist at
+`<agentDir>/delegateau/benchmarks.json`. Every setup review revalidates the cache
+against the current live authenticated registry and clock (`revalidateBenchmarkCache`),
+so a record that aged out or lost its live identity is demoted to a diagnostic.
+- **Explicit commands** (the only evidence-acquiring paths): `/delegateau setup
+import <file>` is a local JSON import with no network seam; `/delegateau setup
+retrieve artificial-analysis <mapping-file>` calls the documented Free-tier
+`GET https://artificialanalysis.ai/api/v2/language/models/free` with
+`ARTIFICIAL_ANALYSIS_API_KEY` from the process environment and an explicit
+user-authored stable-`id` → exact Pi identity map. It never guesses aliases.
+Import, extension load, session start, ordinary review, and dispatch issue no
+benchmark request.
+- **Runtime carry:** `setupConfig` → `parseConfig`/`CandidateProfile` → eligibility
+enrichment → Jev `state.candidates[].benchmarks` + per-candidate criteria facts →
+the dispatch receipt's `routeTrace.benchmarks` with an exact bounded record list
+and `offeredToJev` (true only when the model chooser actually ran; fixed/pin/
+single-candidate records it as false). No raw body, task text, credential, or URL
+query/fragment is retained.
+- **Dominance unchanged in spirit, stricter in comparison:** pruning only compares
+records identical on source/benchmark/version/metric/unit/direction and never
+removes a candidate that lacks evidence.
+
+### Research basis (primary sources)
+
+- `docs/artificialanalysis.ai/data-api/docs`: base URL
+`https://artificialanalysis.ai/api/v2`, `x-api-key`, Free endpoint
+`/language/models/free`, stable model/creator IDs preferred.
+- `artificialanalysis.ai/data-api/migrate-v2-data`: legacy
+`/api/v2/data/llms/models` retires 2026-11-04; the adapter uses the supported
+Free replacement and never the legacy path.
+
+### Red/green evidence (strict vertical slices)
+
+```text
+$ npx vitest run tests/benchmark-retrieval.test.ts    # before the module existed
+Error: Cannot find module '../src/benchmark-retrieval.js'   # red
+# after implementation: 5 passed
+
+$ npx vitest run tests/extension-entry-benchmark.test.ts   # before dispatch wiring
+Tests  2 failed (routeTrace.benchmarks undefined)          # red
+# after wiring: 2 passed (incl. real TypeSafe SDK transport, offered:true)
+
+$ npx vitest run tests/extension-setup-benchmark.test.ts   # before command wiring
+Tests  3 failed (setup fell through to review)             # red
+# after wiring: 3 passed
+
+$ env -u TYPESAFE_API_KEY -u TYPESAFE_BASE_URL npm run check
+Test Files  27 passed (27)
+Tests       214 passed (214)
+```
+
+### Live evidence (real runs, not fixtures)
+
+- Registered `delegate_task` scout dispatch succeeded under Jev selection
+(`ollama-cloud/deepseek-v4.1-flash`); the tool result returned child output.
+- AskJev judgment: `ask_jev_noul` answered with model `jev-1.13.0`, probability
+0.77, 405/20 tokens. `receiptsEnabled:false` was set for this ephemeral call via
+an askjev config that was removed after the call. The `ask_jev_choice` primitive
+returned `invalid_response` on this host.
+- Fresh Pi **0.87.1** headless run in an isolated project, loading the updated
+`src/index.ts` plus the peer extensions with `--no-extensions --no-lsp`:
+Jev chose the child, the child ran (health success recorded), and the receipt
+contained `selectionSource: jev`, `offeredToJev: true`, and the exact synthetic
+`T22SyntheticContract` record. Evidence at
+`/home/nazar/.hermes/cache/scratch/t22-live-20260924T140403Z/`.
+
+### Gaps and boundaries
+
+- No live Artificial Analysis retrieval: `ARTIFICIAL_ANALYSIS_API_KEY` is absent
+from the process environment. The authenticated adapter is verified with injected
+fake fetch plus a local-credential path test; the real AA call remains pending and
+T22 stays PARTIAL. No AA body was read or invented.
+- Host Pi is 0.87.1 while the package peer range is `>=0.85.1 <0.86.0`; the updated
+extension loaded and dispatched successfully on 0.87.1, but that is outside the
+declared peer range.
+- `pi-fast-jev-compaction` loaded without error in the headless run, but no manual
+`compact`/`compaction_end` RPC evidence was captured in this implementation
+session.
+
+## 2026-09-24 — T22 review-fix hardening (uncommitted, TDD)
+
+Applied the four independently-reviewed benchmark-pipeline fixes in place, in
+strict red/green vertical slices; no commit/push. Scratch evidence with the raw
+test output: `/home/nazar/.hermes/cache/scratch/pi-delegateau-review-fixes-evidence.md`.
+
+1. **AA metric semantics + date provenance.** `src/benchmark-retrieval.ts` no
+   longer promotes every numeric `evaluations` field. `ALLOWED_ARTIFICIAL_ANALYSIS_METRICS`
+   admits only the documented Free-tier composite indices (Intelligence, Coding,
+   Agentic); the `intelligence_index_version` is used only for the Intelligence
+   Index, the coding/agentic indices are "not separately versioned", and every
+   other numeric field becomes a bounded `unsupported-metric` diagnostic. Red:
+   received `mmlu_pro`/`some_undocumented_metric` records; green: 2 records + two
+   `unsupported-metric` diagnostics. `BenchmarkEvidence` gained a required
+   `dateKind: "source-reported" | "retrieval-snapshot"`; AA records are
+   `retrieval-snapshot`, local import/config records are `source-reported`, and
+   the route trace and Jev facts carry it.
+2. **Bounded retrieval.** `RetrievalFetchResponse` exposes a raw body stream;
+   the adapter counts bytes chunk-by-chunk, cancels at the first chunk that
+   crosses the 1MB cap, and only then decodes/parses the bounded body. A single
+   `withDeadline` window (default 10s, hard max 30s, `timeoutMs` override) covers
+   fetch and streaming with an AbortController. Red: hung transport timed out
+   2000ms; hung body timed out; oversize returned `malformed`, and an unbounded
+   stream was consumed via `text()`. Green: `source-unavailable` for hung,
+   `oversize` for oversized body, and streaming test proves the body is cancelled
+   without calling `text()` or draining the remainder. Credentialed command path
+   writes no cache when no records are normalized.
+3. **Cache revalidation before merge.** `mergeBenchmarkReport` now takes
+   `{ knownModels, now }` and revalidates prior records via
+   `revalidateBenchmarkCache` before appending the report and applying the
+   8/model cap. Red: 8 stale prior records crowded out the fresh import; green:
+   the fresh record is the only retained record.
+4. **Exact dedup.** `benchmarkRecordKey` now includes `date` and `score`; the
+   separate `benchmarkComparisonKey` (source/benchmark/version/metric/unit/
+   direction/provenance) remains the dominance/pruning key. Red: three distinct
+   observations collapsed to one; green: all three retained.
+
+Canonical check after the final source/test edits: `env -u TYPESAFE_API_KEY -u
+TYPESAFE_BASE_URL npm run check` -> TypeScript build green, **27 files / 221
+tests passed**; `git diff --check` clean. T22 stays **PARTIAL**: the absence of a
+real `ARTIFICIAL_ANALYSIS_API_KEY` is explicit, no live AA call was made, and no
+AA body was read or invented. The only non-benchmark edit was a one-line,
+test-only type correction in `tests/jev.test.ts` (adding the already-required
+`complexityQuestion` argument to an existing delegation-choice test); tests are
+excluded from the build.
+
+## 2026-09-25 — global config, project override
+
+- Standardized with `pi-askjev`: delegateau previously read only `<cwd>/.pi/delegateau.json`
+  and had no user-level config, so every project needed its own copy.
+- `src/config.ts` now exposes `resolveConfig({ cwd, agentDir?, env? })` → `{ config, source, path }`
+  with the order **project → global (`<agent-dir>/delegateau.json`) → defaults**. The agent dir is
+  `PI_CODING_AGENT_DIR`, else `~/.pi/agent`, the same root `defaultReceiptPath()` already used.
+  A project config REPLACES the global one rather than merging, and an unreadable file at either
+  level still fails closed instead of silently falling back to defaults. `loadConfig(cwd)` remains
+  as a thin wrapper so existing call sites keep their behavior.
+- `/delegateau status` now reports the effective source and path. Real Pi RPC run from a directory
+  with no `.pi` config: `config=global (/home/nazar/.pi/agent/delegateau.json)` with the global
+  pool in effect (10 candidates, agents worker+scout, `delegation decision=jev-enforce`).
+- Red before green (`evidence/delegateau-global-config-red.txt`): the six new resolution tests
+  failed with `resolveConfig is not a function`; after implementation, 15/15 pass in
+  `tests/config.test.ts` (`evidence/delegateau-global-config-green.txt`).
+- Canonical `env -u TYPESAFE_API_KEY -u TYPESAFE_BASE_URL npm run check`: build clean;
+  **27 files / 228 tests passed** (was 222; +6 resolution tests).
+- Operator side: the global config is now `/home/nazar/.pi/agent/delegateau.json`, derived from the
+  hand-maintained askjev project config with the two machine-specific `receiptPath` keys removed so
+  receipts fall back to the agent dir. Its 10-candidate pool is the one whose model descriptions
+  carry the measured benchmark evidence; the repo-local file still carries the older 12-candidate
+  prose pool (including the two Kimi models excluded from routing).

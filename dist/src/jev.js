@@ -59,6 +59,10 @@ export class JevSelector {
                 facts.push(candidate.reasoning ? "reasoning-capable" : "no reasoning mode");
             if (candidate.inputModalities && candidate.inputModalities.length > 0)
                 facts.push(`accepts ${candidate.inputModalities.join("+")}`);
+            for (const record of candidate.benchmarks ?? []) {
+                const direction = record.direction === "higher-is-better" ? "higher better" : "lower better";
+                facts.push(`benchmark ${record.benchmark}@${record.version} ${record.metric}=${record.score} ${record.unit} (${direction}; ${record.provenance}, ${record.date} ${record.dateKind}, ${record.source})`);
+            }
             criteria[key] = facts.join(" | ");
         }
         // Known candidate metadata is forwarded to the chooser (F10): provenance,
@@ -80,6 +84,7 @@ export class JevSelector {
                 ...(candidate.latencyMs !== undefined ? { latencyMs: candidate.latencyMs } : {}),
                 ...(candidate.contextWindow !== undefined ? { contextWindow: candidate.contextWindow } : {}),
                 ...(candidate.reasoning !== undefined ? { reasoning: candidate.reasoning } : {}),
+                ...(candidate.benchmarks?.length ? { benchmarks: candidate.benchmarks.map((record) => ({ ...record, model: { ...record.model } })) } : {}),
             })),
             ...(this.quotaState ? { providerQuota: this.quotaState } : {}),
         };

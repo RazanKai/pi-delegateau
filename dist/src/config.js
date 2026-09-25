@@ -1,5 +1,8 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
+import { parseConfiguredBenchmarks } from "./benchmarks.js";
+import { DEFAULT_HEALTH } from "./health.js";
 import { modelKey } from "./types.js";
 const DEFAULT_LIMITS = {
     selectionDeadlineMs: 2_000,
@@ -78,7 +81,41 @@ function readCostMode(value) {
         ...(ollamaPlan ? { ollamaPlan } : {}),
     };
 }
-function readCandidate(value, index) {
+/**
+ * Validate the runtime health circuit policy. A typo here would silently change
+ * how aggressively models are avoided, so unknown shapes are refused rather
+ * than ignored.
+ */
+function readHealthConfig(value) {
+    if (value === undefined)
+        return undefined;
+    if (!isRecord(value))
+        throw new Error("health must be an object");
+    let enabled;
+    if (value.enabled !== undefined) {
+        if (typeof value.enabled !== "boolean")
+            throw new Error("health.enabled must be a boolean");
+        enabled = value.enabled;
+    }
+    const failureThreshold = value.failureThreshold === undefined
+        ? undefined
+        : readPositiveInt(value.failureThreshold, "health.failureThreshold", DEFAULT_HEALTH.failureThreshold);
+    const windowMinutes = value.windowMinutes === undefined
+        ? undefined
+        : readPositiveInt(value.windowMinutes, "health.windowMinutes", DEFAULT_HEALTH.windowMinutes);
+    const cooldownMinutes = value.cooldownMinutes === undefined
+        ? undefined
+        : readPositiveInt(value.cooldownMinutes, "health.cooldownMinutes", DEFAULT_HEALTH.cooldownMinutes);
+    const statePath = value.path === undefined ? undefined : readString(value.path, "health.path");
+    return {
+        ...(enabled !== undefined ? { enabled } : {}),
+        ...(failureThreshold !== undefined ? { failureThreshold } : {}),
+        ...(windowMinutes !== undefined ? { windowMinutes } : {}),
+        ...(cooldownMinutes !== undefined ? { cooldownMinutes } : {}),
+        ...(statePath ? { path: statePath } : {}),
+    };
+}
+function readCandidate(value, index, now) {
     if (!isRecord(value))
         throw new Error(`candidates[${index}] must be an object`);
     const identity = readIdentity(value.identity ?? value, `candidates[${index}]`);
@@ -96,6 +133,7 @@ function readCandidate(value, index) {
     if (reasoning !== undefined && typeof reasoning !== "boolean")
         throw new Error(`candidates[${index}].reasoning must be a boolean`);
     const inputModalities = value.inputModalities === undefined ? undefined : readStringArray(value.inputModalities, `candidates[${index}].inputModalities`);
+    const benchmarks = parseConfiguredBenchmarks(value.benchmarks, identity, `candidates[${index}].benchmarks`, now);
     const cost = isRecord(value.cost)
         ? {
             ...(typeof value.cost.input === "number" && Number.isFinite(value.cost.input) && value.cost.input >= 0 ? { input: value.cost.input } : {}),
@@ -117,6 +155,7 @@ function readCandidate(value, index) {
         ...(maxOutputTokens ? { maxOutputTokens } : {}),
         ...(reasoning !== undefined ? { reasoning } : {}),
         ...(inputModalities && inputModalities.length > 0 ? { inputModalities } : {}),
+        ...(benchmarks ? { benchmarks } : {}),
         ...(cost && Object.keys(cost).length > 0 ? { cost } : {}),
         ...(costSource ? { costSource } : {}),
     };
@@ -161,7 +200,7 @@ function sanitizeAllowedTools(configured, fallback, mode) {
         safe.push("delegate_task");
     return [...new Set(safe)];
 }
-export function parseConfig(raw) {
+export function parseConfig(raw, now = Date.now()) {
     const input = isRecord(raw) ? raw : {};
     const selection = (input.selection ?? "fixed");
     const delegationDecision = (input.delegationDecision ?? "manual");
@@ -178,7 +217,7 @@ export function parseConfig(raw) {
     const candidatesRaw = input.candidates === undefined ? [] : input.candidates;
     if (!Array.isArray(candidatesRaw))
         throw new Error("candidates must be an array");
-    const candidates = candidatesRaw.map(readCandidate);
+    const candidates = candidatesRaw.map((value, index) => readCandidate(value, index, now));
     const seen = new Set();
     for (const candidate of candidates) {
         const key = modelKey(candidate.identity);
@@ -228,6 +267,7 @@ export function parseConfig(raw) {
     // Cost-metering overrides. Kept small and validated: a typo here would silently
     // change which axis the chooser optimises, which is worse than refusing to load.
     const costMode = readCostMode(input.costMode);
+    const health = readHealthConfig(input.health);
     return {
         selection,
         delegationDecision,
@@ -245,6 +285,7 @@ export function parseConfig(raw) {
         limits,
         ...(childThinking ? { childThinking } : {}),
         ...(costMode ? { costMode } : {}),
+        ...(health ? { health } : {}),
         ...(typeof input.receiptPath === "string" && input.receiptPath ? { receiptPath: input.receiptPath } : {}),
         ...(typeof input.decisionReceiptPath === "string" && input.decisionReceiptPath ? { decisionReceiptPath: input.decisionReceiptPath } : {}),
         ...(typeof input.piCommand === "string" && input.piCommand ? { piCommand: input.piCommand } : {}),
@@ -252,16 +293,50 @@ export function parseConfig(raw) {
 }
 export { DEFAULT_LIMITS, KNOWN_COORDINATION_TOOLS, MUTATION_TOOLS, CHILD_TOOLS };
 export const CONFIG_FILE_NAME = ".pi/delegateau.json";
-export function loadConfig(cwd) {
-    const configPath = path.join(cwd, CONFIG_FILE_NAME);
-    if (!fs.existsSync(configPath))
-        return parseConfig({});
+/** The agent directory Pi owns: `PI_CODING_AGENT_DIR`, else `~/.pi/agent`. */
+export function agentDirPath(env = process.env) {
+    const configured = env.PI_CODING_AGENT_DIR?.trim();
+    if (configured)
+        return configured;
+    const home = env.HOME?.trim() || os.homedir();
+    return path.join(home, ".pi", "agent");
+}
+/** The user-level config, applied in every project that has no project config. */
+export function globalConfigPath(env = process.env) {
+    return path.join(agentDirPath(env), "delegateau.json");
+}
+function readConfig(file) {
     let raw;
     try {
-        raw = JSON.parse(fs.readFileSync(configPath, "utf8"));
+        raw = JSON.parse(fs.readFileSync(file, "utf8"));
     }
     catch (error) {
-        throw new Error(`Unable to read ${CONFIG_FILE_NAME}: ${error instanceof Error ? error.message : String(error)}`);
+        // Fail closed: an unreadable config must never be silently replaced by
+        // defaults, in a project file or the global one.
+        throw new Error(`Unable to read ${file}: ${error instanceof Error ? error.message : String(error)}`);
     }
     return parseConfig(raw);
+}
+/**
+ * Resolve delegateau's config: the project file wins when it exists, otherwise
+ * the global agent-dir file applies, otherwise built-in defaults.
+ *
+ * A project file REPLACES the global one rather than merging with it, so a
+ * project cannot end up with a half-global policy that no single file states.
+ */
+export function resolveConfig(input) {
+    const env = input.env ?? process.env;
+    const projectPath = path.join(input.cwd, CONFIG_FILE_NAME);
+    if (fs.existsSync(projectPath))
+        return { config: readConfig(projectPath), source: "project", path: projectPath };
+    const globalPath = input.agentDir
+        ? path.join(input.agentDir, "delegateau.json")
+        : globalConfigPath(env);
+    if (fs.existsSync(globalPath))
+        return { config: readConfig(globalPath), source: "global", path: globalPath };
+    return { config: parseConfig({}), source: "defaults" };
+}
+/** Back-compat wrapper: the project config when present, else the global one. */
+export function loadConfig(cwd) {
+    return resolveConfig({ cwd }).config;
 }

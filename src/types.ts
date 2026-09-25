@@ -1,4 +1,5 @@
 import type { QuotaState } from "./quota.js";
+import type { HealthConfig } from "./health.js";
 
 export type SelectionMode = "fixed" | "jev";
 export type DelegationMode = "normal" | "delegate-execution" | "coordinator-only";
@@ -9,6 +10,35 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhi
 export interface ModelIdentity {
   provider: string;
   id: string;
+}
+
+export type BenchmarkProvenance = "provider" | "independent";
+export type BenchmarkDirection = "higher-is-better" | "lower-is-better";
+/**
+ * Provenance of a record's `date`. `source-reported` is an observation or
+ * measurement date the source itself reported. `retrieval-snapshot` is the
+ * date an adapter fetched a snapshot because the source exposes no
+ * per-observation date; it must never be presented as a measurement date.
+ */
+export type BenchmarkDateKind = "source-reported" | "retrieval-snapshot";
+
+/** A validated, directly attributable benchmark observation for one exact Pi model identity. */
+export interface BenchmarkEvidence {
+  model: ModelIdentity;
+  /** Stable source identifier, not free-form capability prose. */
+  source: string;
+  /** Public HTTPS source without credentials, query, or fragment. */
+  sourceUrl: string;
+  benchmark: string;
+  version: string;
+  metric: string;
+  /** The date value; interpretation is fixed by `dateKind`. */
+  date: string;
+  dateKind: BenchmarkDateKind;
+  provenance: BenchmarkProvenance;
+  score: number;
+  unit: string;
+  direction: BenchmarkDirection;
 }
 
 export interface CandidateProfile {
@@ -33,6 +63,8 @@ export interface CandidateProfile {
   reasoning?: boolean;
   /** Provider-declared accepted input modalities, when known. */
   inputModalities?: string[];
+  /** Bounded normalized records; unlike metrics/versions remain separate. */
+  benchmarks?: BenchmarkEvidence[];
 }
 
 /**
@@ -228,6 +260,8 @@ export interface DelegateConfig {
   receiptPath?: string;
   decisionReceiptPath?: string;
   piCommand?: string;
+  /** Runtime health circuit policy (threshold/window/cooldown/path). */
+  health?: HealthConfig;
 }
 
 export function modelKey(identity: ModelIdentity): string {

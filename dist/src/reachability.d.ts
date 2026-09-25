@@ -29,9 +29,13 @@ export declare function writeProbeCache(cache: ProbeCache, filePath?: string): v
  * Look up whether a model is known-unreachable. A model with no probe entry is
  * treated as reachable: absence of evidence is not evidence of absence, and
  * blocking an unprobed model would silently shrink the pool (which is the bug
- * this whole change exists to fix).
+ * this whole change exists to fix). A negative entry excludes the model only
+ * while its own result is fresh; once the 24h window lapses that model is
+ * treated as unprobed again, even though the cache file — and its stale
+ * entry — remain on disk. Positive entries never exclude, fresh or stale.
+ * `now` is an injectable clock so freshness behavior is tested deterministically.
  */
-export declare function isKnownUnreachable(identity: ModelIdentity, cache: ProbeCache | undefined): boolean;
+export declare function isKnownUnreachable(identity: ModelIdentity, cache: ProbeCache | undefined, now?: number): boolean;
 export interface ProbeRunOptions {
     /** Absolute path to the pi executable; defaults to PATH lookup. */
     command?: string;

@@ -1,8 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { benchmarkComparisonKey } from "./benchmarks.js";
 import { resolveCostMode, type CostModeConfig } from "./quota.js";
 import { runProbe, type ProbeCache, type ProbeResult } from "./reachability.js";
-import type { CandidateProfile, ModelIdentity } from "./types.js";
+import type { BenchmarkEvidence, CandidateProfile, ModelIdentity } from "./types.js";
+export type { BenchmarkEvidence } from "./types.js";
 
 export interface RegistryForSetup {
   getAvailable(): readonly RegistrySetupModel[];
@@ -12,15 +14,10 @@ export interface RegistrySetupModel {
   provider: string; id: string; contextWindow?: number; maxTokens?: number;
   reasoning?: boolean; input?: string[]; cost?: { input?: number; output?: number; cacheRead?: number }; latencyMs?: number;
 }
-export interface BenchmarkEvidence {
-  model: ModelIdentity; source: string; benchmark: string; version: string; date: string;
-  provenance: "provider" | "independent"; score?: number;
-}
 export interface SetupCandidate extends CandidateProfile {
   probe?: ProbeResult;
   accessMode: "token" | "quota-gpu-time";
   accessDecision: string;
-  benchmark?: BenchmarkEvidence;
   state: "unmeasured" | "reachable" | "unreachable";
 }
 export interface SetupPlan { candidates: SetupCandidate[]; agents: Record<string, unknown>; reasons: string[]; }
@@ -58,34 +55,46 @@ export function discoverSetupCandidates(registry: RegistryForSetup, costMode: Co
   });
 }
 
-/** Only comparable evidence (same source, benchmark and version) can prove dominance. */
+/** Only identical source/benchmark/version/metric/unit/direction records are comparable. */
 export function pruneSetupCandidates(candidates: SetupCandidate[], evidence: BenchmarkEvidence[] = [], probes?: ProbeCache): { candidates: SetupCandidate[]; reasons: string[] } {
   const reasons: string[] = [];
   const withEvidence: SetupCandidate[] = candidates.map((candidate) => {
-    const probe = probes?.results.find((r) => key(r.identity) === key(candidate.identity));
-    const benchmark = evidence.find((e) => key(e.model) === key(candidate.identity));
-    return { ...candidate, ...(probe ? { probe } : {}), ...(benchmark ? { benchmark } : {}) };
+    const probe = probes?.results.find((result) => key(result.identity) === key(candidate.identity));
+    const benchmarks = evidence.filter((entry) => key(entry.model) === key(candidate.identity));
+    return { ...candidate, ...(probe ? { probe } : {}), ...(benchmarks.length > 0 ? { benchmarks } : {}) };
   });
   const live = withEvidence.filter((candidate) => {
-    if (candidate.probe && !candidate.probe.reachable) { reasons.push(`${key(candidate.identity)} removed: confirmed unreachable (${candidate.probe.errorCategory ?? "unknown-error"})`); return false; }
+    if (candidate.probe && !candidate.probe.reachable) {
+      reasons.push(`${key(candidate.identity)} removed: confirmed unreachable (${candidate.probe.errorCategory ?? "unknown-error"})`);
+      return false;
+    }
     return true;
   }).map((candidate) => ({ ...candidate, state: candidate.probe?.reachable ? "reachable" as const : "unmeasured" as const }));
   const retained = live.filter((candidate) => {
-    const mine = candidate.benchmark;
-    if (!mine || mine.score === undefined) return true;
+    const mine = candidate.benchmarks ?? [];
+    // Absence of benchmark evidence is never evidence that a model is worse.
+    if (mine.length === 0) return true;
     const dominator = live.find((other) => {
-      const theirs = other.benchmark;
-      if (!theirs || theirs.score === undefined || other === candidate) return false;
-      // Scores have meaning only within an identical source/benchmark/version.
-      if (theirs.source !== mine.source || theirs.benchmark !== mine.benchmark || theirs.version !== mine.version) return false;
+      if (other === candidate) return false;
+      const theirs = other.benchmarks ?? [];
       const cheap = other.cost?.input !== undefined && candidate.cost?.input !== undefined && other.cost.input <= candidate.cost.input;
       const context = other.contextWindow !== undefined && candidate.contextWindow !== undefined && other.contextWindow >= candidate.contextWindow;
-      const mineScore = mine.score!; const theirScore = theirs.score!;
-      const otherInput = other.cost!.input!; const candidateInput = candidate.cost!.input!;
-      const otherContext = other.contextWindow!; const candidateContext = candidate.contextWindow!;
-      return theirScore >= mineScore && cheap && context && (theirScore > mineScore || otherInput < candidateInput || otherContext > candidateContext);
+      if (!cheap || !context) return false;
+      let strictlyBetterScore = false;
+      const allComparableAndNoWorse = mine.every((mineRecord) => {
+        const theirRecord = theirs.find((entry) => benchmarkComparisonKey(entry) === benchmarkComparisonKey(mineRecord));
+        if (!theirRecord) return false;
+        const noWorse = mineRecord.direction === "higher-is-better" ? theirRecord.score >= mineRecord.score : theirRecord.score <= mineRecord.score;
+        const better = mineRecord.direction === "higher-is-better" ? theirRecord.score > mineRecord.score : theirRecord.score < mineRecord.score;
+        strictlyBetterScore ||= better;
+        return noWorse;
+      });
+      return allComparableAndNoWorse && (strictlyBetterScore || other.cost!.input! < candidate.cost!.input! || other.contextWindow! > candidate.contextWindow!);
     });
-    if (dominator) { reasons.push(`${key(candidate.identity)} removed: dominated by ${key(dominator.identity)} using ${mine.source}/${mine.benchmark}@${mine.version}`); return false; }
+    if (dominator) {
+      reasons.push(`${key(candidate.identity)} removed: dominated by ${key(dominator.identity)} using ${mine.length} comparable benchmark record(s)`);
+      return false;
+    }
     return true;
   });
   return { candidates: retained, reasons };
@@ -122,7 +131,7 @@ export async function probeSetupPlan(plan: SetupPlan, options: { cwd: string; co
 
 /** Safe config projection: no credential/auth/cache/telemetry fields are representable. */
 export function setupConfig(plan: SetupPlan): Record<string, unknown> {
-  const candidates = plan.candidates.map(({ identity, description, capabilities, provenance, cost, costSource, contextWindow, maxOutputTokens, reasoning, inputModalities, latencyMs }) => ({ identity, description, capabilities, provenance, ...(cost ? { cost } : {}), ...(costSource ? { costSource } : {}), ...(contextWindow ? { contextWindow } : {}), ...(maxOutputTokens ? { maxOutputTokens } : {}), ...(reasoning !== undefined ? { reasoning } : {}), ...(inputModalities ? { inputModalities } : {}), ...(latencyMs ? { latencyMs } : {}) }));
+  const candidates = plan.candidates.map(({ identity, description, capabilities, provenance, cost, costSource, contextWindow, maxOutputTokens, reasoning, inputModalities, latencyMs, benchmarks }) => ({ identity, description, capabilities, provenance, ...(cost ? { cost } : {}), ...(costSource ? { costSource } : {}), ...(contextWindow ? { contextWindow } : {}), ...(maxOutputTokens ? { maxOutputTokens } : {}), ...(reasoning !== undefined ? { reasoning } : {}), ...(inputModalities ? { inputModalities } : {}), ...(latencyMs ? { latencyMs } : {}), ...(benchmarks?.length ? { benchmarks } : {}) }));
   return { selection: "jev", delegationDecision: "manual", preference: "balanced", candidates, ...(candidates[0] ? { defaultModel: candidates[0].identity } : {}), agents: plan.agents };
 }
 

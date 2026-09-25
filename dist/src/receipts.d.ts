@@ -1,6 +1,7 @@
 import type { DelegationDecision, ExecutionOutcome, GateRestriction, GateSource, GateStatus } from "./gate.js";
 import type { ChildResult } from "./types.js";
 import type { DelegationPolicy, DelegationMode, ModelIdentity, SelectionSource } from "./types.js";
+import type { RouteTrace } from "./route-trace.js";
 export interface ReceiptInput {
     dispatchId: string;
     decisionId?: string | undefined;
@@ -27,6 +28,12 @@ export interface ReceiptInput {
     errorCategory?: string;
     groupCleaned?: boolean;
     outputTruncated?: boolean;
+    /**
+     * Structured, bounded and safe route trace. Built by `route-trace.ts` from
+     * structured facts only; it has no field that could carry task/prompt/output
+     * text, repository contents or raw provider bodies.
+     */
+    routeTrace?: RouteTrace;
 }
 export type ReceiptErrorCategory = "credential-missing" | "timeout" | "invalid-response" | "cancelled" | "sensing-prohibited" | "budget" | "quota" | "connection" | "sensor-error";
 /**

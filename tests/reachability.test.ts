@@ -106,3 +106,75 @@ describe("probe cache", () => {
     expect(readFileSync(join(dir, "args"), "utf8")).toContain("--offline");
   });
 });
+
+describe("per-result reachability freshness", () => {
+  const now = Date.parse("2026-09-19T12:00:00Z");
+  const target = { provider: "openai-codex", id: "gpt-5.4-mini" };
+
+  /** A negative result whose own timestamp may differ from the file's. */
+  const negative = (resultProbedAt: string, cacheProbedAt = "2026-09-19T12:00:00Z"): ProbeCache => ({
+    version: PROBE_CACHE_VERSION,
+    probedAt: cacheProbedAt,
+    results: [{ identity: target, reachable: false, errorCategory: "unsupported-model", probedAt: resultProbedAt }],
+  });
+
+  const positive = (probedAt: string): ProbeCache => ({
+    version: PROBE_CACHE_VERSION,
+    probedAt,
+    results: [{ identity: target, reachable: true, probedAt }],
+  });
+
+  it("excludes a model whose negative result is fresh", () => {
+    expect(isKnownUnreachable(target, negative("2026-09-19T11:00:00Z"), now)).toBe(true);
+  });
+
+  // The stale-probe bug: a merged cache keeps an old negative entry while the
+  // top-level file stamp stays fresh. Only the entry's own age may exclude.
+  it("treats a negative result older than 24h as unprobed even while the cache file remains", () => {
+    const stale = negative("2026-09-18T11:59:59Z", "2026-09-19T12:00:00Z");
+    expect(isProbeCacheFresh(stale, now)).toBe(true);
+    expect(isKnownUnreachable(target, stale, now)).toBe(false);
+  });
+
+  it("treats a negative result exactly at the 24h boundary as stale", () => {
+    expect(isKnownUnreachable(target, negative("2026-09-18T12:00:00Z"), now)).toBe(false);
+  });
+
+  // A negative result dated after the injected clock is not fresh evidence; it
+  // is invalid and must be treated as unprobed so a skewed timestamp cannot
+  // exclude the model indefinitely into the future.
+  it("treats a negative result dated after the current time as unprobed", () => {
+    expect(isKnownUnreachable(target, negative("2026-09-19T12:00:01Z"), now)).toBe(false);
+  });
+
+  it("does not exclude when the per-result timestamp is missing", () => {
+    const cache = {
+      version: PROBE_CACHE_VERSION,
+      probedAt: "2026-09-19T11:00:00Z",
+      results: [{ identity: target, reachable: false, probedAt: undefined as unknown as string }],
+    } as ProbeCache;
+    expect(isKnownUnreachable(target, cache, now)).toBe(false);
+  });
+
+  it("does not exclude when the per-result timestamp is malformed", () => {
+    expect(isKnownUnreachable(target, negative("not-a-date"), now)).toBe(false);
+  });
+
+  it("never excludes a reachable model, fresh or stale", () => {
+    expect(isKnownUnreachable(target, positive("2026-09-19T11:00:00Z"), now)).toBe(false);
+    expect(isKnownUnreachable(target, positive("2026-09-01T11:00:00Z"), now)).toBe(false);
+  });
+
+  it("judges each result by its own timestamp, not the newest file write", () => {
+    const mixed: ProbeCache = {
+      version: PROBE_CACHE_VERSION,
+      probedAt: "2026-09-19T11:00:00Z",
+      results: [
+        { identity: { provider: "openai-codex", id: "stale-negative" }, reachable: false, probedAt: "2026-09-17T11:00:00Z" },
+        { identity: { provider: "openai-codex", id: "fresh-negative" }, reachable: false, probedAt: "2026-09-19T11:00:00Z" },
+      ],
+    };
+    expect(isKnownUnreachable({ provider: "openai-codex", id: "stale-negative" }, mixed, now)).toBe(false);
+    expect(isKnownUnreachable({ provider: "openai-codex", id: "fresh-negative" }, mixed, now)).toBe(true);
+  });
+});
