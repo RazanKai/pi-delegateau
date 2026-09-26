@@ -1,5 +1,49 @@
 # pi-delegateau work log
 
+## 2026-09-26 07:05 CEST — evidence upkeep runs itself
+
+The operator's objection was the right one: "why do I have to run a command — the skill
+should check how old the data is, compare it to Pi's latest model list, and decide to
+refresh or not, then continue." A freshness *report* is still a chore.
+
+- Replaced `scripts/benchmark-freshness.mjs` with `scripts/benchmark-evidence.mjs`, whose
+  default action is decide-and-act (no flags needed). It refreshes when: evidence is older
+  than 90 days; a config record already expired; cached records stopped validating against
+  the live registry; or Pi's model list changed since the last run. It re-derives the
+  mapping, fetches, projects the records onto the EXISTING candidates only, backs the file
+  up, writes atomically, and re-parses with the extension's own `parseConfig` to prove the
+  result still loads. `--check` (decide only), `--force`, `--json`, `--config`.
+- Self-limiting: a cooldown (default 6h, `DELEGATEAU_REFRESH_COOLDOWN_HOURS`) so repeated
+  skill loads cannot hammer the source, and state at
+  `<agentDir>/delegateau/evidence-refresh.json`. It exits 0 when it cannot refresh, after
+  saying why, so it is safe to call from anything that must not fail closed.
+- The credential now lives in `~/.hermes/.env` (mode 0600), where the durable store is;
+  it was previously only in the scratch copy, which prunes. Read from there, never printed,
+  passed to subprocesses through the environment only.
+- **Three bugs found by running it, not by reading it:**
+  1. The registry was passed to the validator as `"provider/id"` strings, but `parseShape`
+     reads `value.model.provider`/`.id` — so EVERY record validated as `unmatched-model`
+     (51 reported unmatched while the data was fine). Fix: convert to objects at the boundary.
+  2. Re-fetching appended a duplicate of each measurement, because the adapter dates records
+     with the retrieval date; 22 records became 44 on one extra refresh and would have grown
+     until the per-model cap evicted real evidence. Fix: key on (metric, version, score) and
+     move the date forward, keeping a changed score as a new record. This also compacts
+     duplicates already written.
+  3. The change detector had no baseline, so a first run reported the entire registry as
+     added and removed (25 added, 25 removed on consecutive runs), and — because the list was
+     only stored by a refresh — a newly added model could not be noticed at all while the
+     evidence stayed fresh. Fix: guard on a stored list, and record the baseline on no-op
+     runs too.
+- Verified end to end against the live credential: first run records the baseline and fetches
+  nothing; a forced run derives 19 mappings, attaches records, and leaves 8 of 10 candidates
+  measured; a second run is a true no-op (22 records, no false change alert); aged evidence
+  (120 days) triggers a real refresh automatically; a simulated newly-added model is reported
+  as `1 added, 0 removed` and wants a refresh.
+- Canonical `env -u TYPESAFE_API_KEY -u TYPESAFE_BASE_URL npm run check`: **27 files / 241
+  tests passed** (the suite does not cover `scripts/`, so the end-to-end runs above are the
+  evidence for this change).
+
+
 ## 2026-09-25 22:30 CEST — evidence freshness, and a defect the age rule introduced
 
 Prompted by "how does this data get updated over time as the available models change":

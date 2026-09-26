@@ -64,7 +64,16 @@ fails closed at whichever level it was found rather than silently falling back t
 defaults. `/delegateau status` reports which source is in effect:
 `config=global (/home/user/.pi/agent/delegateau.json)`.
 
-Benchmark evidence is acquired only by an explicit command, and nothing refreshes it implicitly: `scripts/benchmark-freshness.mjs` reports evidence age, the exact date the oldest record leaves the config, and whether a refresh is worth running (read-only; `--refresh` re-derives the mapping and re-retrieves when the credential is present). `setup import` reads a
+Benchmark evidence is kept current by `scripts/benchmark-evidence.mjs`, which decides for
+itself: with no arguments it compares the evidence in the effective config against the
+current live `pi --list-models` and refreshes only when there is a reason — evidence older
+than 90 days, a config record that already expired, cached records that stopped validating,
+or Pi's model list having changed since the last run. It re-derives the identity mapping,
+fetches current scores, copies them onto the existing candidates without changing anything
+else, backs the config up, and re-parses the result with this package's own parser to prove
+it still loads. `--check` decides without changing anything; `--force` refreshes regardless
+of age; `--json` is for machine reading. A run that cannot refresh (no credential, no
+network) says why and exits 0. The extension itself never fetches: `setup import` reads a
 local structured JSON document and makes no network request. `setup retrieve
 artificial-analysis` is the one supported network adapter: it calls Artificial
 Analysis's authenticated v2 Free-tier language-model endpoint
